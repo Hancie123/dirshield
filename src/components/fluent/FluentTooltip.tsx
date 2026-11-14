@@ -2,7 +2,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 /** Tooltip shown after a short hover delay, positioned above the target. */
-export function FluentTooltip({ content, children }: { content: ReactNode; children: ReactNode }) {
+export function FluentTooltip({ content, children, className = "inline-flex" }: { content: ReactNode; children: ReactNode; className?: string }) {
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const timer = useRef<number | undefined>(undefined);
   const show = (el: HTMLElement) => {
@@ -17,7 +17,7 @@ export function FluentTooltip({ content, children }: { content: ReactNode; child
     setPos(null);
   };
   return (
-    <span className="inline-flex" onMouseEnter={(e) => show(e.currentTarget)} onMouseLeave={hide} onMouseDown={hide} onFocus={(e) => show(e.currentTarget)} onBlur={hide}>
+    <span className={className} onMouseEnter={(e) => show(e.currentTarget)} onMouseLeave={hide} onMouseDown={hide} onFocus={(e) => show(e.currentTarget)} onBlur={hide}>
       {children}
       {pos &&
         createPortal(

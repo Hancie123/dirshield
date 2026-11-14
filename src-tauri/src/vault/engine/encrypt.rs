@@ -31,6 +31,8 @@ pub struct NewVaultSpec<'a> {
     pub vault_id: &'a str,
     pub source: &'a Path,
     pub vault_root: &'a Path,
+    /// Folder name for the vault inside `vault_root`; defaults to the vault id.
+    pub dir_name: Option<&'a str>,
     pub vk: &'a [u8; 32],
     pub wrappers: Vec<KeyWrapper>,
     pub name_enc: String,
@@ -45,7 +47,7 @@ pub struct NewVault {
 }
 
 pub fn create_secure_vault(db: &Db, spec: NewVaultSpec, ctrl: &Control) -> Result<NewVault> {
-    let vault_dir = spec.vault_root.join(spec.vault_id);
+    let vault_dir = spec.vault_root.join(spec.dir_name.unwrap_or(spec.vault_id));
     if vault_dir.exists() {
         return Err(Error::Conflict("vault directory already exists".into()));
     }

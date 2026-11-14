@@ -69,7 +69,7 @@ fn setup(tree: impl FnOnce(&Path)) -> Fx {
     let wrappers = vec![header::password_wrapper_with(&vault_id, "folder-password", &vk, test_kdf()).unwrap()];
     let nv = engine::create_secure_vault(
         &db,
-        NewVaultSpec { vault_id: &vault_id, source: &source, vault_root: &root.join("vaults"), vk: &vk, wrappers, name_enc: "x".into(), path_enc: "x".into(), key_mode: "password", chunk: CHUNK },
+        NewVaultSpec { vault_id: &vault_id, source: &source, vault_root: &root.join("vaults"), dir_name: None, vk: &vk, wrappers, name_enc: "x".into(), path_enc: "x".into(), key_mode: "password", chunk: CHUNK },
         &Control::default(),
     )
     .unwrap();

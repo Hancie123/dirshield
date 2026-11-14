@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ColorRegular, FolderOpenRegular, KeyRegular, ArrowSyncRegular, PlayCircleRegular, StorageRegular, TimerRegular, WindowRegular, LockShieldRegular, KeyResetRegular, GlobeRegular, SaveRegular, HistoryRegular, ShieldCheckmarkRegular } from "@fluentui/react-icons";
+import { ColorRegular, FolderOpenRegular, KeyRegular, ArrowSyncRegular, PlayCircleRegular, TimerRegular, WindowRegular, LockShieldRegular, KeyResetRegular, GlobeRegular, SaveRegular, HistoryRegular, ShieldCheckmarkRegular } from "@fluentui/react-icons";
 import { api, errMsg, type Settings } from "@/api";
 import { setThemePreference, useStore } from "@/app/store";
 import { FluentButton, FluentDialog, FluentSelect, FluentToggle, SectionHeader, SettingsRow, useNotify } from "@/components/fluent";
@@ -9,7 +9,6 @@ import { PortableVaultsDialog } from "@/features/recovery/components/PortableVau
 import { RestoreBackupForm } from "@/features/recovery/components/RestoreBackupForm";
 import { ChangeMasterDialog } from "@/features/settings/ChangeMasterDialog";
 import { formatDate } from "@/lib/format";
-import { pickFolder } from "@/lib/pickers";
 
 export function SettingsPage() {
   const { info } = useStore();
@@ -41,7 +40,7 @@ export function SettingsPage() {
   return (
     <div className="flex flex-col gap-1">
       <SectionHeader>Appearance</SectionHeader>
-      <SettingsRow icon={<ColorRegular />} title="App theme" description="Follow Windows, or choose light or dark.">
+      <SettingsRow icon={<ColorRegular />} title="App theme">
         <FluentSelect
           label="App theme"
           value={s.theme}
@@ -55,10 +54,10 @@ export function SettingsPage() {
       </SettingsRow>
 
       <SectionHeader>Security</SectionHeader>
-      <SettingsRow icon={<KeyRegular />} title="Master password" description="Changing it re-wraps your keys instantly — no folder is re-encrypted.">
+      <SettingsRow icon={<KeyRegular />} title="Master password">
         <FluentButton onClick={() => setPwOpen(true)}>Change</FluentButton>
       </SettingsRow>
-      <SettingsRow icon={<TimerRegular />} title="Lock DirShield after inactivity" description="Running operations continue in the background while locked. Choose Never to turn auto-lock off.">
+      <SettingsRow icon={<TimerRegular />} title="Lock DirShield after inactivity">
         <FluentSelect
           label="Auto-lock"
           value={s.autoLockMinutes}
@@ -73,20 +72,19 @@ export function SettingsPage() {
           ]}
         />
       </SettingsRow>
-      <SettingsRow icon={<LockShieldRegular />} title="Sign out when Windows locks or sleeps" description="Also when you sign out of Windows. Folders open in a work session are locked again.">
+      <SettingsRow icon={<LockShieldRegular />} title="Sign out when Windows locks or sleeps">
         <FluentToggle label="Sign out on lock" checked={s.signOutOnLock} onChange={(signOutOnLock) => save({ ...s, signOutOnLock })} />
       </SettingsRow>
-      <SettingsRow icon={<KeyResetRegular />} title="Recovery key" description="Lost it, or someone else may have seen it? Create a new one; the old key stops working.">
+      <SettingsRow icon={<KeyResetRegular />} title="Recovery key">
         <FluentButton onClick={() => setRkOpen(true)}>Create new key…</FluentButton>
       </SettingsRow>
       <SettingsRow
         icon={<GlobeRegular />}
         title="Open vaults on another PC with the master password"
-        description="Without this, a vault folder moved to another PC opens only with the recovery key. With it, your master password is enough — and is also what protects a copied vault folder."
       >
         <FluentToggle label="Portable vaults" checked={s.portableVaults} onChange={(v) => setPortable(v)} />
       </SettingsRow>
-      <SettingsRow icon={<ShieldCheckmarkRegular />} title="Check vault integrity automatically" description="While you're signed in and nothing else is running, each Secure Lock vault that uses your master password is checked in the background. You're notified if one fails.">
+      <SettingsRow icon={<ShieldCheckmarkRegular />} title="Check vault integrity automatically">
         <FluentSelect
           label="Integrity checks"
           value={s.verifyIntervalDays}
@@ -104,7 +102,7 @@ export function SettingsPage() {
       <SettingsRow
         icon={<SaveRegular />}
         title="Back up DirShield's data"
-        description={`An encrypted copy of the folder list, Quick Lock passwords, settings and activity. It opens with your master password or recovery key. ${s.lastBackupAt ? `Last backup: ${formatDate(s.lastBackupAt)}.` : "No backup yet."}`}
+        description={s.lastBackupAt ? `Last backup: ${formatDate(s.lastBackupAt)}` : "No backup yet"}
       >
         <FluentButton
           disabled={backingUp}
@@ -126,7 +124,7 @@ export function SettingsPage() {
           {backingUp ? "Backing up…" : "Back up…"}
         </FluentButton>
       </SettingsRow>
-      <SettingsRow icon={<HistoryRegular />} title="Restore from a backup" description="Replaces DirShield's data with a backup.">
+      <SettingsRow icon={<HistoryRegular />} title="Restore from a backup">
         <FluentButton onClick={() => setRestoreOpen(true)}>Restore…</FluentButton>
       </SettingsRow>
 
@@ -134,30 +132,16 @@ export function SettingsPage() {
       <SettingsRow
         icon={<WindowRegular />}
         title="File Explorer context menu"
-        description={
-          s.contextMenu && !s.contextMenuCurrent
-            ? "Registered, but pointing to a different copy of DirShield. Turn off and on to repair."
-            : "Adds Quick Lock, Secure Lock, Unlock and Unhide when you right-click a folder. On Windows 11 they're under “Show more options”."
-        }
+        description={s.contextMenu && !s.contextMenuCurrent ? "Registered, but pointing to a different copy of DirShield. Turn off and on to repair." : undefined}
       >
         <FluentToggle label="Context menu" checked={s.contextMenu} onChange={(contextMenu) => save({ ...s, contextMenu })} />
       </SettingsRow>
-      <SettingsRow icon={<PlayCircleRegular />} title="Start DirShield when I sign in to Windows" description="Starts minimized.">
+      <SettingsRow icon={<PlayCircleRegular />} title="Start DirShield when I sign in to Windows">
         <FluentToggle label="Launch at startup" checked={s.launchAtStartup} onChange={(launchAtStartup) => save({ ...s, launchAtStartup })} />
       </SettingsRow>
 
       <SectionHeader>Storage and performance</SectionHeader>
-      <SettingsRow icon={<StorageRegular />} title="Default vault location" description={s.defaultVaultRoot}>
-        <FluentButton
-          onClick={async () => {
-            const p = await pickFolder("Choose the default location for encrypted vaults", s.defaultVaultRoot);
-            if (p) save({ ...s, defaultVaultRoot: p });
-          }}
-        >
-          Change…
-        </FluentButton>
-      </SettingsRow>
-      <SettingsRow icon={<ArrowSyncRegular />} title="Files processed in parallel" description="Higher can be faster on SSDs. Keep 1–2 for hard drives and USB sticks.">
+      <SettingsRow icon={<ArrowSyncRegular />} title="Files processed in parallel">
         <FluentSelect
           label="Parallel files"
           value={s.concurrency}

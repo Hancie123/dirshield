@@ -18,7 +18,10 @@ export function FluentTable<T>({
   onOpen,
   onContextMenu,
   empty,
+  minWidth,
 }: {
+  /** Below this width the table scrolls horizontally instead of squeezing columns. */
+  minWidth?: number;
   columns: Column<T>[];
   rows: T[];
   rowKey: (r: T) => string;
@@ -30,8 +33,9 @@ export function FluentTable<T>({
 }) {
   const template = columns.map((c) => c.width ?? "1fr").join(" ");
   return (
-    <div role="grid" className="rounded-[8px] bg-[var(--card)] border border-[var(--stroke-card)] overflow-hidden">
-      <div role="row" className="grid items-center h-9 px-3 gap-3 border-b border-[var(--stroke-divider)] t-caption text-[var(--text-2)]" style={{ gridTemplateColumns: template }}>
+    <div className="rounded-[8px] bg-[var(--card)] border border-[var(--stroke-card)] overflow-x-auto">
+    <div role="grid" style={{ minWidth }}>
+      <div role="row" className="grid items-center h-9 px-3 gap-3 mx-1 border-b border-[var(--stroke-divider)] t-caption text-[var(--text-2)]" style={{ gridTemplateColumns: template }}>
         {columns.map((c) => (
           <div role="columnheader" key={c.key} className={`truncate ${c.align === "right" ? "text-right" : ""}`}>
             {c.header}
@@ -67,6 +71,7 @@ export function FluentTable<T>({
           </div>
         );
       })}
+    </div>
     </div>
   );
 }

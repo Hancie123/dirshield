@@ -24,7 +24,6 @@ export function OrphanRecovery() {
       <SettingsRow
         icon={<WarningRegular className="text-[var(--caution)]" />}
         title={`${orphans.length} Quick-Locked folder(s) without a record`}
-        description="These folders are still protected in DirShield's store, but their database entry is missing (for example after the database was deleted). Return them to their original location."
       >
         <FluentButton
           onClick={() => {

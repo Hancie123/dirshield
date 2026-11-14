@@ -142,7 +142,7 @@ export default function App() {
         </div>
       </main>
       <DialogHost />
-      {dragging && (
+      {dragging && page !== "home" && (
         <div className="fixed inset-3 z-50 pointer-events-none rounded-[8px] border-2 border-dashed border-[var(--accent)] bg-[var(--layer)]/80 flex flex-col items-center justify-center gap-2">
           <LockClosedRegular fontSize={40} className="text-[var(--accent)]" />
           <div className="t-subtitle font-display">Drop to protect this folder</div>

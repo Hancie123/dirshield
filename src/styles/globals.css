@@ -159,7 +159,8 @@ select,
 *:hover::-webkit-scrollbar-thumb { background-color: var(--text-3); }
 ::-webkit-scrollbar-thumb:hover { border-width: 3px; }
 
-:focus-visible {
+/* Text fields show focus with the accent underline on their shell instead. */
+:focus-visible:not(input, textarea) {
   outline: 2px solid var(--text-1);
   outline-offset: 1px;
   border-radius: 4px;

@@ -25,16 +25,16 @@ export function RecoveryPage() {
         Your recovery key can unlock any folder protected on this PC, reset your master password, and re-open vaults if the DirShield database is lost. If both the master password and the recovery key are lost, encrypted data cannot be recovered.
       </InfoBar>
       <SectionHeader>Recover</SectionHeader>
-      <SettingsRow icon={<WarningRegular />} title="Interrupted operations" description={attention.length ? `${attention.length} operation(s) can be resumed or discarded safely.` : "Nothing needs recovery."} onClick={() => setPage("operations")}>
+      <SettingsRow icon={<WarningRegular />} title="Interrupted operations" onClick={() => setPage("operations")}>
         {attention.length > 0 && <Badge tone="critical">{attention.length}</Badge>}
         <ChevronRightRegular />
       </SettingsRow>
-      <SettingsRow icon={<KeyRegular />} title="Unlock a folder with the recovery key" description="Use this if you've forgotten a folder password.">
+      <SettingsRow icon={<KeyRegular />} title="Unlock a folder with the recovery key">
         <FluentButton disabled={!recoverable.length} onClick={() => setPick(true)}>
           Choose folder
         </FluentButton>
       </SettingsRow>
-      <SettingsRow icon={<ArrowImportRegular />} title="Import an existing vault" description="Re-register a Secure Lock vault folder: after reinstalling Windows, losing DirShield's data, or to open it on this PC.">
+      <SettingsRow icon={<ArrowImportRegular />} title="Import an existing vault">
         <FluentButton onClick={() => setImportOpen(true)}>Import…</FluentButton>
       </SettingsRow>
       <OrphanRecovery />

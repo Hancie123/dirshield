@@ -130,7 +130,8 @@ pub(super) fn quick_lock_impl(app: &AppHandle, st: &AppState, mk: &Key32, path: 
         let src = validate_target(st, mk, path, None)?;
         let rep = scan::scan(&src, false)?;
         let id = crypto::random_id();
-        let state = quicklock::lock(&src, Some(&st.dirs.quick_store), &id, hide, Some(&st.dirs.base))?;
+        // Never moved: the folder is locked (and optionally hidden) where it is.
+        let state = quicklock::lock(&src, None, &id, hide, Some(&st.dirs.base))?;
         let mdk = crypto::metadata_key(mk);
         let now = now_ms();
         let key_mode = if folder_password.is_some() { "password" } else { "master" };
@@ -276,13 +277,21 @@ pub async fn secure_lock(app: AppHandle, path: String, credential: Credential, f
             auth::validate_new_password(fp)?;
         }
         let src = validate_target(st, &mk, &path, None)?;
-        let root = vault_root.filter(|s| !s.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| default_vault_root(st));
+        // By default the vault is created next to the folder, on the same drive,
+        // so large folders never fill up the system drive.
+        let custom_root = vault_root.filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+        let root = match &custom_root {
+            Some(r) => r.clone(),
+            None => src.parent().map(Path::to_path_buf).unwrap_or_else(|| default_vault_root(st)),
+        };
         std::fs::create_dir_all(&root)?;
         let root = fsutil::normalize(&root)?;
         if is_same_or_inside(&root, &src) {
             return invalid("The vault location can't be inside the folder you're locking.");
         }
-        let _ = search::mark_not_indexed(&root);
+        if custom_root.is_some() {
+            let _ = search::mark_not_indexed(&root);
+        }
         let meta = auth::load_metadata(&st.db)?.ok_or(Error::NotInitialized)?;
         let vault_id = crypto::random_id();
         let vk = crypto::random_key();
@@ -292,11 +301,13 @@ pub async fn secure_lock(app: AppHandle, path: String, credential: Credential, f
         };
         let wrappers = header_wrappers(st, &meta, &vault_id, &vk, primary)?;
         let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let dir_name = unique_vault_dir_name(&root, &name);
         let mdk = crypto::metadata_key(&mk);
         let spec = NewVaultSpec {
             vault_id: &vault_id,
             source: &src,
             vault_root: &root,
+            dir_name: Some(&dir_name),
             vk: &vk,
             wrappers,
             name_enc: crypto::encrypt_text(&mdk, &name, &aad(&vault_id, "name")),
@@ -306,6 +317,7 @@ pub async fn secure_lock(app: AppHandle, path: String, credential: Credential, f
         };
         let ctrl = engine::Control::default();
         let nv = engine::create_secure_vault(&st.db, spec, &ctrl)?;
+        let _ = search::mark_not_indexed(&nv.vault_dir);
         let (tf, tb): (i64, i64) = st.db.lock().query_row("SELECT total_files, total_bytes FROM operations WHERE id=?1", [&nv.op_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         spawn_encrypt(app, st, nv.op_id.clone(), vault_id, nv.vault_dir, src, name, vk, tf as u64, tb as u64)?;
         emit_vaults_changed(app);
@@ -872,4 +884,13 @@ pub async fn recover_orphan(app: AppHandle, id: String, password: String, dest: 
         Ok(fsutil::display_path(&p))
     })
     .await
+}
+
+/// "<name>.dsvault" inside `root`, or "<name> (2).dsvault" etc. if taken.
+fn unique_vault_dir_name(root: &Path, name: &str) -> String {
+    let base = if name.trim().is_empty() { "Vault" } else { name };
+    (1..)
+        .map(|i| if i == 1 { format!("{base}.dsvault") } else { format!("{base} ({i}).dsvault") })
+        .find(|n| !root.join(n).exists())
+        .expect("unbounded range always yields a free name")
 }

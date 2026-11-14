@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
-import { FolderOpenRegular, FlashRegular, ShieldLockRegular } from "@fluentui/react-icons";
+import { ChevronDownRegular, FolderOpenRegular, FolderRegular, FlashRegular, ShieldLockRegular } from "@fluentui/react-icons";
 import { api, errMsg, type OperationInfo, type ScanReport } from "@/api";
 import { useStore } from "@/app/store";
-import { KeyValue } from "@/components/KeyValue";
 import { OperationProgress } from "@/components/OperationProgress";
 import { StrengthHint } from "@/components/PasswordStrength";
 import { FluentButton, FluentCheckbox, FluentDialog, FluentPasswordInput, FluentRadio, FluentSegmented, FluentSpinner, InfoBar, useNotify } from "@/components/fluent";
@@ -12,7 +11,7 @@ import { pickFolder } from "@/lib/pickers";
 type Step = "pick" | "scanning" | "confirm" | "working" | "progress" | "done" | "failed";
 
 export function LockDialog({ initialMode, initialPath, initialHide = true }: { initialMode: "quick" | "secure"; initialPath?: string; initialHide?: boolean }) {
-  const { closeDialog, info, openDialog, vaults, refresh } = useStore();
+  const { closeDialog, openDialog, vaults, refresh } = useStore();
   const notify = useNotify();
   const [mode, setMode] = useState(initialMode);
   const [path, setPath] = useState(initialPath ?? "");
@@ -27,10 +26,13 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
   const [vaultRoot, setVaultRoot] = useState("");
   const [vaultFree, setVaultFree] = useState<number | null>(null);
   const [understood, setUnderstood] = useState(false);
+  const [more, setMore] = useState(false);
   const [opId, setOpId] = useState<string | null>(null);
   const [finalOp, setFinalOp] = useState<OperationInfo | undefined>();
 
-  const root = vaultRoot || info?.defaultVaultRoot || "";
+  // Default: the vault is created next to the folder, on the same drive.
+  const besideFolder = scan ? scan.path.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]*$/, "") || scan.path : "";
+  const root = vaultRoot || (/^[A-Za-z]:$/.test(besideFolder) ? `${besideFolder}\\` : besideFolder);
 
   const doScan = async (p: string) => {
     setStep("scanning");
@@ -119,7 +121,7 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
     );
 
   return (
-    <FluentDialog open title={title} onClose={step === "progress" || step === "done" || step === "failed" || !busy ? closeDialog : undefined} dismissable={!busy} width={step === "confirm" || step === "working" ? 600 : 540} footer={footer}>
+    <FluentDialog open title={title} onClose={step === "progress" || step === "done" || step === "failed" || !busy ? closeDialog : undefined} dismissable={!busy} width={500} footer={footer}>
       {(step === "pick" || step === "scanning" || step === "confirm" || step === "working") && (
         <div className="flex flex-col gap-4">
           <FluentSegmented
@@ -149,32 +151,16 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
           {error && <InfoBar severity="error">{error}</InfoBar>}
           {scan && (step === "confirm" || step === "working") && (
             <>
-              <KeyValue
-                rows={[
-                  ["Folder", <span className="font-semibold">{scan.name}</span>],
-                  ["Location", scan.path],
-                  ["Size", `${formatBytes(scan.totalBytes)} · ${formatCount(scan.totalFiles)} files, ${formatCount(scan.totalDirs)} folders`],
-                  ...(mode === "secure" ? ([["Space needed", `About ${formatBytes(scan.estimatedVaultBytes)} on ${root}${vaultFree != null ? ` (${formatBytes(vaultFree)} free)` : ""}`]] as [string, React.ReactNode][]) : []),
-                  ["Drive", scan.driveType === "removable" ? "Removable drive" : scan.driveType === "network" ? "Network drive" : "Local drive"],
-                ]}
-              />
-              {mode === "quick" ? (
-                <>
-                  <FluentCheckbox checked={hide} onChange={setHide}>
-                    Also hide the folder
-                  </FluentCheckbox>
-                  <InfoBar severity="warning" title="Quick Lock is not encryption.">
-                    {hide
-                      ? "It hides the folder, moves it into DirShield's protected store when it's on the same drive, blocks every app (including other file managers) from opening anything inside, and removes its contents from Windows Search."
-                      : "The folder stays visible where it is, but no app (Explorer or any other file manager) can open it or anything inside, and its contents are removed from Windows Search."}{" "}
-                    Administrators, another operating system, offline disk access or privileged software can bypass it. Use Secure Lock for sensitive data.
-                  </InfoBar>
-                </>
-              ) : (
-                <InfoBar severity="info" title="Secure Lock encrypts everything.">
-                  File contents, names and folder structure are encrypted with AES-256-GCM. Your originals stay untouched until encryption is complete and verified — you decide afterwards whether to remove them.
-                </InfoBar>
-              )}
+              <div className="flex items-center gap-3 px-3 py-2.5 rounded-[6px] bg-[var(--card)] border border-[var(--stroke-card)]">
+                <FolderRegular fontSize={28} className="text-[#e8a22a] shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-semibold truncate">{scan.name}</div>
+                  <div className="t-caption text-[var(--text-2)] truncate" title={scan.path}>
+                    {formatBytes(scan.totalBytes)} · {formatCount(scan.totalFiles)} files · {scan.path}
+                  </div>
+                </div>
+              </div>
+              {mode === "quick" && <p className="t-caption text-[var(--text-2)] -mt-2">Quick Lock blocks access but doesn't encrypt. Use Secure Lock for sensitive data.</p>}
               {scan.links > 0 && (
                 <InfoBar severity="warning" title={`${formatCount(scan.links)} link(s) or junction(s) will be skipped.`}>
                   They are not followed and stay where they are.
@@ -186,44 +172,64 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
                   <div className="t-caption mt-1 text-[var(--text-2)] truncate">{scan.inaccessibleSamples.slice(0, 3).join(" · ")}</div>
                 </InfoBar>
               )}
-              {mode === "secure" && !spaceOk && <InfoBar severity="error" title="Not enough free space.">Choose another vault location or free up space.</InfoBar>}
-              {mode === "secure" && (
-                <div className="flex items-center gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div>Vault location</div>
-                    <div className="t-caption text-[var(--text-2)] truncate">{root}</div>
-                  </div>
-                  <FluentButton
-                    onClick={async () => {
-                      const p = await pickFolder("Choose where to store the encrypted vault", root);
-                      if (p) setVaultRoot(p);
-                    }}
-                  >
-                    Change…
-                  </FluentButton>
-                </div>
+              {mode === "secure" && !spaceOk && (
+                <InfoBar severity="error" title="Not enough free space.">
+                  Needs about {formatBytes(scan.estimatedVaultBytes)}; {vaultFree != null ? formatBytes(vaultFree) : "less"} free. Choose another vault location under More options.
+                </InfoBar>
               )}
-              <div className="h-px bg-[var(--stroke-divider)]" />
-              <FluentRadio
-                name="Password"
-                value={useFolderPw}
-                onChange={setUseFolderPw}
-                options={[
-                  { value: "master", label: "Use my master password", description: "Recommended. You can change it later without re-encrypting." },
-                  { value: "password", label: "Use a separate password for this folder", description: "Your recovery key can still unlock it." },
-                ]}
-              />
-              {useFolderPw === "password" && (
-                <div className="grid grid-cols-2 gap-3">
-                  <FluentPasswordInput label="Folder password" value={folderPw} onChange={(e) => setFolderPw(e.target.value)} hint={<StrengthHint pw={folderPw} />} />
-                  <FluentPasswordInput label="Confirm folder password" value={folderPw2} onChange={(e) => setFolderPw2(e.target.value)} error={pwMismatch ? "Passwords don't match" : undefined} />
-                </div>
-              )}
-              <FluentPasswordInput label="Confirm with your master password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && canConfirm && submit()} />
+              <FluentPasswordInput label="Master password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && canConfirm && submit()} />
               {mode === "secure" && (
                 <FluentCheckbox checked={understood} onChange={setUnderstood}>
-                  I understand that without my password and recovery key, encrypted data can't be recovered by anyone.
+                  I understand encrypted data can't be recovered without my password or recovery key.
                 </FluentCheckbox>
+              )}
+
+              <button type="button" className="flex items-center gap-1.5 self-start text-[14px] text-[var(--text-1)] hover:text-[var(--text-2)]" onClick={() => setMore((m) => !m)} aria-expanded={more}>
+                <ChevronDownRegular className={`transition-transform ${more ? "" : "-rotate-90"}`} />
+                More options
+              </button>
+              {more && (
+                <div className="flex flex-col gap-4 pl-5">
+                  {mode === "quick" && (
+                    <FluentCheckbox checked={hide} onChange={setHide}>
+                      Also hide the folder
+                    </FluentCheckbox>
+                  )}
+                  {mode === "secure" && (
+                    <div className="flex items-center gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div>Vault location{!vaultRoot && <span className="text-[var(--text-2)]"> · next to the folder</span>}</div>
+                        <div className="t-caption text-[var(--text-2)] truncate" title={root}>
+                          {root}
+                          {vaultFree != null && ` · ${formatBytes(vaultFree)} free`}
+                        </div>
+                      </div>
+                      <FluentButton
+                        onClick={async () => {
+                          const p = await pickFolder("Choose where to store the encrypted vault", root);
+                          if (p) setVaultRoot(p);
+                        }}
+                      >
+                        Change…
+                      </FluentButton>
+                    </div>
+                  )}
+                  <FluentRadio
+                    name="Password"
+                    value={useFolderPw}
+                    onChange={setUseFolderPw}
+                    options={[
+                      { value: "master", label: "Use my master password" },
+                      { value: "password", label: "Use a separate password for this folder" },
+                    ]}
+                  />
+                  {useFolderPw === "password" && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <FluentPasswordInput label="Folder password" value={folderPw} onChange={(e) => setFolderPw(e.target.value)} hint={<StrengthHint pw={folderPw} />} />
+                      <FluentPasswordInput label="Confirm folder password" value={folderPw2} onChange={(e) => setFolderPw2(e.target.value)} error={pwMismatch ? "Passwords don't match" : undefined} />
+                    </div>
+                  )}
+                </div>
               )}
             </>
           )}

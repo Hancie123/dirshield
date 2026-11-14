@@ -23,7 +23,7 @@ export function FoldersPage() {
     {
       key: "name",
       header: "Name",
-      width: "minmax(180px,2fr)",
+      width: "minmax(160px,2fr)",
       render: (v) => (
         <div className="flex items-center gap-3 min-w-0">
           <span className="relative flex text-[22px] text-[#e8a22a]">
@@ -35,21 +35,21 @@ export function FoldersPage() {
         </div>
       ),
     },
-    { key: "mode", header: "Protection", width: "110px", render: (v) => (v.mode === "secure" ? "Secure Lock" : "Quick Lock") },
+    { key: "mode", header: "Protection", width: "100px", render: (v) => <span className="whitespace-nowrap">{v.mode === "secure" ? "Secure Lock" : "Quick Lock"}</span> },
     {
       key: "loc",
       header: "Original location",
-      width: "minmax(140px,2fr)",
+      width: "minmax(120px,2fr)",
       render: (v) => (
-        <FluentTooltip content={v.originalPath}>
-          <span className="block truncate text-[var(--text-2)]">{v.originalPath}</span>
+        <FluentTooltip content={v.originalPath} className="flex min-w-0">
+          <span className="truncate text-[var(--text-2)]">{v.originalPath}</span>
         </FluentTooltip>
       ),
     },
-    { key: "size", header: "Size", width: "90px", align: "right", render: (v) => <span className="tabular-nums">{formatBytes(v.sizeBytes)}</span> },
-    { key: "files", header: "Files", width: "80px", align: "right", render: (v) => <span className="tabular-nums">{formatCount(v.fileCount)}</span> },
-    { key: "date", header: "Date locked", width: "150px", render: (v) => <span className="text-[var(--text-2)]">{formatDate(v.lockedAt ?? v.createdAt)}</span> },
-    { key: "status", header: "Status", width: "minmax(130px,1.2fr)", render: (v) => <Badge tone={vaultTone(v.status)}>{vaultStatusLabel[v.status]}</Badge> },
+    { key: "size", header: "Size", width: "80px", align: "right", render: (v) => <span className="tabular-nums whitespace-nowrap">{formatBytes(v.sizeBytes)}</span> },
+    { key: "files", header: "Files", width: "56px", align: "right", render: (v) => <span className="tabular-nums">{formatCount(v.fileCount)}</span> },
+    { key: "date", header: "Date locked", width: "160px", render: (v) => <span className="block truncate text-[var(--text-2)]">{formatDate(v.lockedAt ?? v.createdAt)}</span> },
+    { key: "status", header: "Status", width: "minmax(120px,1fr)", render: (v) => <Badge tone={vaultTone(v.status)}>{vaultStatusLabel[v.status]}</Badge> },
     {
       key: "more",
       header: "",
@@ -105,6 +105,7 @@ export function FoldersPage() {
         columns={columns}
         rows={vaults}
         rowKey={(v) => v.id}
+        minWidth={960}
         selected={selected}
         onSelect={(v) => setSelected(v.id)}
         onOpen={(v) => openDialog({ kind: "details", vault: v })}
