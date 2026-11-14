@@ -972,8 +972,5 @@ pub async fn recover_orphan(app: AppHandle, id: String, password: String, dest: 
 /// "<name>.dsvault" inside `root`, or "<name> (2).dsvault" etc. if taken.
 fn unique_vault_dir_name(root: &Path, name: &str) -> String {
     let base = if name.trim().is_empty() { "Vault" } else { name };
-    (1..)
-        .map(|i| if i == 1 { format!("{base}.dsvault") } else { format!("{base} ({i}).dsvault") })
-        .find(|n| !root.join(n).exists())
-        .expect("unbounded range always yields a free name")
+    (1..).map(|i| if i == 1 { format!("{base}.dsvault") } else { format!("{base} ({i}).dsvault") }).find(|n| !root.join(n).exists()).expect("unbounded range always yields a free name")
 }

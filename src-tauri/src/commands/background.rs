@@ -167,13 +167,8 @@ pub async fn work_session_recover(app: AppHandle, id: String, credential: Option
         let src = i.restored_path.clone().ok_or_else(|| Error::NotFound("where this folder was restored to".into()))?;
         let mdk = crypto::metadata_key(&mk);
         let name = folder_name(&src);
-        let ws = WorkSession {
-            vk,
-            source: PathBuf::from(&src),
-            name_enc: crypto::encrypt_text(&mdk, &name, &aad(&r.id, "name")),
-            path_enc: crypto::encrypt_text(&mdk, &src, &aad(&r.id, "path")),
-            name,
-        };
+        let ws =
+            WorkSession { vk, source: PathBuf::from(&src), name_enc: crypto::encrypt_text(&mdk, &name, &aad(&r.id, "name")), path_enc: crypto::encrypt_text(&mdk, &src, &aad(&r.id, "path")), name };
         let op = relock_and_clean(app, st, &r, ws)?;
         st.db.log("work_session_recovered", Some(&id), "info", None);
         emit_vaults_changed(app);

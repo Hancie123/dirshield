@@ -207,7 +207,8 @@ impl AttrHandle {
         use windows::core::PCWSTR;
         use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
         let w = wide(p);
-        let h = unsafe { CreateFileW(PCWSTR(w.as_ptr()), FILE_READ_ATTRIBUTES.0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None) }.ok()?;
+        let h =
+            unsafe { CreateFileW(PCWSTR(w.as_ptr()), FILE_READ_ATTRIBUTES.0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None) }.ok()?;
         Some(Self(h))
     }
 
@@ -244,7 +245,7 @@ pub fn file_id(_p: &Path) -> Option<String> {
 #[cfg(windows)]
 pub fn path_by_file_id(last_known: &Path, id: &str) -> Option<PathBuf> {
     use windows::Win32::Storage::FileSystem::{
-        GetFinalPathNameByHandleW, OpenFileById, ExtendedFileIdType, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+        ExtendedFileIdType, GetFinalPathNameByHandleW, OpenFileById, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS, VOLUME_NAME_DOS,
     };
     let (serial, fid) = id.split_once('-')?;
@@ -259,11 +260,8 @@ pub fn path_by_file_id(last_known: &Path, id: &str) -> Option<PathBuf> {
     if hint.id()?.VolumeSerialNumber != serial {
         return None; // a different volume is mounted there now
     }
-    let desc = FILE_ID_DESCRIPTOR {
-        dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
-        Type: ExtendedFileIdType,
-        Anonymous: FILE_ID_DESCRIPTOR_0 { ExtendedFileId: FILE_ID_128 { Identifier: fid } },
-    };
+    let desc =
+        FILE_ID_DESCRIPTOR { dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32, Type: ExtendedFileIdType, Anonymous: FILE_ID_DESCRIPTOR_0 { ExtendedFileId: FILE_ID_128 { Identifier: fid } } };
     let h = unsafe { OpenFileById(hint.0, &desc, FILE_READ_ATTRIBUTES.0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, FILE_FLAG_BACKUP_SEMANTICS) }.ok()?;
     let h = AttrHandle(h);
     let mut buf = vec![0u16; 32_768];

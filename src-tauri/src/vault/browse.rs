@@ -228,6 +228,8 @@ impl VaultIndex {
 /// script in web pages) when "opened". Those files can be extracted, but
 /// DirShield won't launch them straight out of a vault.
 pub fn is_executable(name: &str) -> bool {
+    // Grouped by kind, several per line: rustfmt would put each on its own line.
+    #[rustfmt::skip]
     const EXT: &[&str] = &[
         // Programs, installers and scripts
         "exe", "com", "bat", "cmd", "scr", "pif", "msi", "msp", "msix", "msixbundle", "appx", "appxbundle", "appinstaller", "ps1", "psm1", "psd1", "ps1xml", "psc1", "vb", "vbs", "vbe", "js", "jse",
@@ -253,9 +255,11 @@ pub fn mark_from_internet(file: &Path) -> Result<()> {
     let mut ads = file.as_os_str().to_owned();
     ads.push(":Zone.Identifier");
     let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).open(PathBuf::from(ads))?;
-    f.write_all(b"[ZoneTransfer]
+    f.write_all(
+        b"[ZoneTransfer]
 ZoneId=3
-")?;
+",
+    )?;
     Ok(())
 }
 
@@ -322,7 +326,25 @@ mod tests {
 
     #[test]
     fn executable_detection() {
-        for n in ["setup.EXE", "a.b.ps1", "x.lnk", "run.cmd", "console.msc", "app.appref-ms", "disk.iso", "d.vhdx", "budget.xlsm", "page.HTML", "pic.svg", "a.mht", "add.xll", "s.sct", "nb.one", "trick.exe.", "trick.exe "] {
+        for n in [
+            "setup.EXE",
+            "a.b.ps1",
+            "x.lnk",
+            "run.cmd",
+            "console.msc",
+            "app.appref-ms",
+            "disk.iso",
+            "d.vhdx",
+            "budget.xlsm",
+            "page.HTML",
+            "pic.svg",
+            "a.mht",
+            "add.xll",
+            "s.sct",
+            "nb.one",
+            "trick.exe.",
+            "trick.exe ",
+        ] {
             assert!(is_executable(n), "{n}");
         }
         for n in ["report.pdf", "photo.jpg", "notes", "archive.tar.gz", "exe"] {
