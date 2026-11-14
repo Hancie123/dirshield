@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{self, hkdf32, EscrowBox, Key32, KdfParams, Sealed};
+use crate::crypto::{self, hkdf32, EscrowBox, KdfParams, Key32, Sealed};
 use crate::error::{Error, Result};
 
 pub const HEADER_MAGIC: &[u8; 8] = b"DIRSHLD\0";
@@ -201,9 +201,5 @@ pub fn password_wrapper_with(vault_id: &str, password: &str, vk: &[u8; 32], kdf:
 }
 
 pub fn recovery_wrapper(vault_id: &str, recovery_pub: &[u8; 32], recovery_id: &str, recovery_salt: &[u8], vk: &[u8; 32]) -> Result<KeyWrapper> {
-    Ok(KeyWrapper::RecoveryEscrow {
-        recovery_id: recovery_id.to_string(),
-        salt: recovery_salt.to_vec(),
-        escrow: crypto::escrow_seal(recovery_pub, vk, &wrapper_aad(vault_id, "recovery"))?,
-    })
+    Ok(KeyWrapper::RecoveryEscrow { recovery_id: recovery_id.to_string(), salt: recovery_salt.to_vec(), escrow: crypto::escrow_seal(recovery_pub, vk, &wrapper_aad(vault_id, "recovery"))? })
 }

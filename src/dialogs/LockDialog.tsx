@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { FolderOpenRegular, FlashRegular, ShieldLockRegular } from "@fluentui/react-icons";
 import { api, errMsg, type OperationInfo, type ScanReport } from "../lib/api";
 import { FluentButton, FluentCheckbox, FluentDialog, FluentPasswordInput, FluentRadio, FluentSegmented, FluentSpinner, InfoBar, useNotify } from "../components/fluent";
-import { formatBytes, formatCount, passwordStrength } from "../lib/format";
+import { formatBytes, formatCount } from "../lib/format";
+import { StrengthHint } from "../lib/strength";
 import { useStore } from "../lib/store";
 import { KeyValue, OperationProgress, pickFolder } from "./shared";
 
@@ -212,7 +213,7 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
               />
               {useFolderPw === "password" && (
                 <div className="grid grid-cols-2 gap-3">
-                  <FluentPasswordInput label="Folder password" value={folderPw} onChange={(e) => setFolderPw(e.target.value)} hint={folderPw ? passwordStrength(folderPw).label : "At least 8 characters"} />
+                  <FluentPasswordInput label="Folder password" value={folderPw} onChange={(e) => setFolderPw(e.target.value)} hint={<StrengthHint pw={folderPw} />} />
                   <FluentPasswordInput label="Confirm folder password" value={folderPw2} onChange={(e) => setFolderPw2(e.target.value)} error={pwMismatch ? "Passwords don't match" : undefined} />
                 </div>
               )}

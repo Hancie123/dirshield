@@ -91,6 +91,13 @@ fn delete_ini(ini: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Tells Explorer to redraw folder icons. A targeted update for the folder is
+/// not enough: Explorer keeps the cached plain-folder icon until it reloads.
+pub fn refresh_explorer(folder: &Path) {
+    fsutil::notify_shell_changed(folder);
+    crate::shell::notify_assoc_changed();
+}
+
 /// Removes the icon and restores any original `desktop.ini`. Call after the
 /// folder's deny ACE has been removed.
 pub fn remove(folder: &Path) -> Result<()> {

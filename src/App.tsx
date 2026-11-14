@@ -18,6 +18,7 @@ import {
 import { api } from "./lib/api";
 import { FluentButton, FluentNavigation, FluentSpinner, FluentTooltip, type NavItem } from "./components/fluent";
 import { useStore, type Page } from "./lib/store";
+import { UpdateBanner, useAutoUpdateCheck } from "./lib/updater";
 import { LoginPage, SetupPage } from "./pages/AuthPages";
 import { HomePage } from "./pages/HomePage";
 import { FoldersPage } from "./pages/FoldersPage";
@@ -69,6 +70,7 @@ function DialogHost() {
 
 export default function App() {
   const { info, unlocked, page, setPage, ops, setUnlocked } = useStore();
+  useAutoUpdateCheck();
 
   if (!info)
     return (
@@ -117,6 +119,7 @@ export default function App() {
       />
       <main className="flex-1 min-w-0 h-full overflow-y-auto rounded-tl-[8px] bg-[var(--layer)] border-l border-t border-[var(--stroke-card)]">
         <div key={page} className="anim-page max-w-[1100px] mx-auto px-10 pt-7 pb-10 max-[900px]:px-5">
+          <UpdateBanner />
           <h1 className="t-title font-display mb-6">{titles[page]}</h1>
           {page === "home" && <HomePage />}
           {page === "folders" && <FoldersPage />}

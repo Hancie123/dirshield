@@ -84,8 +84,8 @@ pub fn attrs(meta: &fs::Metadata) -> u32 {
 pub fn wide(p: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     let s = display_path(p).replace('/', "\\");
-    let v = if s.starts_with(r"\\") {
-        format!(r"\\?\UNC\{}", &s[2..])
+    let v = if let Some(rest) = s.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{rest}")
     } else if s.len() >= 2 && s.as_bytes()[1] == b':' {
         format!(r"\\?\{s}")
     } else {
@@ -185,8 +185,7 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
     use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
     let f = wide(from);
     let t = wide(to);
-    unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVEFILE_WRITE_THROUGH) }
-        .map_err(|e| std::io::Error::from_raw_os_error((e.code().0 & 0xFFFF) as i32))
+    unsafe { MoveFileExW(PCWSTR(f.as_ptr()), PCWSTR(t.as_ptr()), MOVEFILE_WRITE_THROUGH) }.map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
 }
 #[cfg(not(windows))]
 pub fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -251,7 +250,7 @@ pub fn clear_readonly(p: &Path) -> Result<()> {
 /// Tell Explorer something changed so it refreshes without F5.
 #[cfg(windows)]
 pub fn notify_shell_changed(p: &Path) {
-    use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEDIR, SHCNE_UPDATEITEM, SHCNF_PATHW, SHCNF_FLUSHNOWAIT};
+    use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEDIR, SHCNE_UPDATEITEM, SHCNF_FLUSHNOWAIT, SHCNF_PATHW};
     // The item itself (refreshes its icon), then its parent's listing.
     let item = wide_str(&display_path(p));
     unsafe { SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, Some(item.as_ptr() as _), None) };

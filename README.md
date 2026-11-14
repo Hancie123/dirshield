@@ -25,7 +25,7 @@ DirShield is a free, open-source folder locker for Windows 10 and 11. It has two
 - **Quick Lock** hides a folder and blocks access to it instantly, whatever its size.
 - **Secure Lock** encrypts a folder's contents, file names and directory structure with AES-256-GCM.
 
-DirShield works fully offline. It has no accounts, no telemetry and no cloud dependency. Your keys never leave your machine.
+DirShield works offline. It has no accounts, no telemetry and no cloud dependency, and your keys never leave your machine. The only network request is the signed update check against GitHub Releases (see [Updates](#updates)).
 
 ## Features
 
@@ -109,6 +109,37 @@ recovery key    ──X25519───▶ every vault key is also escrowed to the
 ### Download
 
 Download the latest installer from the [**Releases**](https://github.com/Hancie123/dirshield/releases) page and run it. DirShield installs per user and needs no administrator rights.
+
+### Verifying a download
+
+Every release lists a `SHA256SUMS.txt` file and a signed build-provenance attestation that proves the files were built by this repository's GitHub Actions workflow from the tagged commit.
+
+```powershell
+# Checksum (PowerShell): compare with the line in SHA256SUMS.txt
+Get-FileHash .\DirShield_<version>_x64-setup.exe -Algorithm SHA256
+
+# Provenance (GitHub CLI)
+gh attestation verify .\DirShield_<version>_x64-setup.exe --repo Hancie123/dirshield
+```
+
+### Updates
+
+DirShield checks GitHub Releases for a new version a few seconds after it starts, and you can check by hand under **About → Updates**. Updates are signed with the project's update key. The app checks that signature against the public key built into it and refuses any update that fails the check. An update is never installed while an encryption or restore is still running. The update check is the only network request DirShield makes.
+
+### Linux (experimental)
+
+Releases also include `.deb` and `.AppImage` builds. They run the same code, but DirShield is designed for Windows, and several protections depend on Windows features:
+
+| Feature | Linux |
+| --- | --- |
+| Secure Lock (AES-256-GCM vaults, recovery key, import, verify) | ✅ Works the same as on Windows. Vaults move between Windows and Linux. |
+| Master password, auto-lock, rate limiting, activity log | ✅ Works |
+| Auto-update | ✅ AppImage only (`.deb` installs must be updated by hand) |
+| Quick Lock | ⚠️ **No real protection.** The folder is only moved into DirShield's data folder. The NTFS deny-ACLs and hidden/system attributes that Quick Lock relies on are not applied. Use Secure Lock instead. |
+| File manager context menu, start at sign-in, Windows Search exclusion, Mica | ❌ Windows only |
+| Free-space check before encrypting | ❌ Skipped. Make sure the target drive has room. |
+
+On Linux, data lives in `$XDG_DATA_HOME/DirShield` (usually `~/.local/share/DirShield`).
 
 ### Where your data lives
 

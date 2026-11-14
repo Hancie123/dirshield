@@ -11,19 +11,21 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use zeroize::Zeroizing;
 
-use crate::app::AppState;
+use crate::app::{AppState, BrowseSession};
 use crate::auth::{self, RateLimiter};
-use crate::crypto::{self, Key32, KdfParams};
+use crate::crypto::{self, KdfParams, Key32};
 use crate::db::now_ms;
 use crate::error::{invalid, Error, Result};
 use crate::fsutil::{self, is_same_or_inside};
+use crate::hello;
 use crate::quicklock::{self, QuickState};
+use crate::search;
 use crate::shell::{self, ShellAction};
-use crate::vault::engine::{self, CleanupReport, DecryptParams, EncryptJob, NewVaultSpec};
+use crate::vault::browse::{self, Entry as BrowseEntry, VaultIndex};
+use crate::vault::engine::{self, CleanupReport, DecryptParams, EncryptJob, NewVaultSpec, RelockParams};
 use crate::vault::header::{self, KeyWrapper, VaultHeader};
 use crate::vault::scan::{self, ScanReport};
 use crate::vault::stream::DEFAULT_CHUNK;
-use crate::search;
 
 async fn run<T, F>(app: &AppHandle, f: F) -> Result<T>
 where
@@ -46,14 +48,24 @@ where
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credential {
-    /// "master" | "folder" | "recovery"
+    /// "master" | "folder" | "recovery" | "hello" (Windows Hello; no secret)
     pub kind: String,
+    #[serde(default)]
     pub secret: String,
 }
 
 fn verify_master(st: &AppState, password: &str) -> Result<Key32> {
     let meta = auth::load_metadata(&st.db)?.ok_or(Error::NotInitialized)?;
     RateLimiter::guarded(&st.db, || auth::unwrap_master(&meta, password))
+}
+
+/// Master key from a "master" (password) or "hello" (Windows Hello) credential.
+fn master_from(st: &AppState, cred: &Credential) -> Result<Key32> {
+    match cred.kind.as_str() {
+        "master" => verify_master(st, &Zeroizing::new(cred.secret.clone())),
+        "hello" => hello::unlock(&st.db),
+        _ => Err(Error::AuthFailed),
+    }
 }
 
 fn aad(id: &str, field: &str) -> Vec<u8> {
@@ -75,9 +87,10 @@ struct VaultRow {
     quick: Option<String>,
     locked_at: Option<i64>,
     created_at: i64,
+    restored_enc: Option<String>,
 }
 
-const VAULT_COLS: &str = "id, name, original_path, vault_path, protection_mode, key_mode, status, size_bytes, file_count, skipped_count, quick_state, locked_at, created_at";
+const VAULT_COLS: &str = "id, name, original_path, vault_path, protection_mode, key_mode, status, size_bytes, file_count, skipped_count, quick_state, locked_at, created_at, restored_path";
 
 fn map_row(r: &rusqlite::Row) -> rusqlite::Result<VaultRow> {
     Ok(VaultRow {
@@ -94,15 +107,12 @@ fn map_row(r: &rusqlite::Row) -> rusqlite::Result<VaultRow> {
         quick: r.get(10)?,
         locked_at: r.get(11)?,
         created_at: r.get(12)?,
+        restored_enc: r.get(13)?,
     })
 }
 
 fn load_vault(st: &AppState, id: &str) -> Result<VaultRow> {
-    st.db
-        .lock()
-        .query_row(&format!("SELECT {VAULT_COLS} FROM vaults WHERE id=?1"), [id], map_row)
-        .optional()?
-        .ok_or_else(|| Error::NotFound("protected folder".into()))
+    st.db.lock().query_row(&format!("SELECT {VAULT_COLS} FROM vaults WHERE id=?1"), [id], map_row).optional()?.ok_or_else(|| Error::NotFound("protected folder".into()))
 }
 
 fn all_vaults(st: &AppState) -> Result<Vec<VaultRow>> {
@@ -130,6 +140,8 @@ pub struct VaultInfo {
     pub hidden: Option<bool>,
     pub moved: Option<bool>,
     pub busy: bool,
+    /// Where a Secure Lock vault was last restored to.
+    pub restored_path: Option<String>,
 }
 
 fn info(st: &AppState, mk: &[u8; 32], r: &VaultRow) -> VaultInfo {
@@ -153,6 +165,7 @@ fn info(st: &AppState, mk: &[u8; 32], r: &VaultRow) -> VaultInfo {
         hidden: q.as_ref().map(|q| q.hidden),
         moved: q.as_ref().map(|q| q.moved),
         busy: st.ops.is_vault_busy(&r.id),
+        restored_path: r.restored_enc.as_deref().and_then(|e| crypto::decrypt_text(&mdk, e, &aad(&r.id, "restored")).ok()),
     }
 }
 
@@ -163,6 +176,14 @@ fn secure_vault_key(st: &AppState, row: &VaultRow, cred: &Credential) -> Result<
     }
     let secret = Zeroizing::new(cred.secret.clone());
     let header = VaultHeader::read(Path::new(&row.vault_path))?;
+    if cred.kind == "hello" {
+        // Not under the rate limiter: Windows Hello has its own lockout, and
+        // its prompt must not hold the limiter's gate while the user responds.
+        let mk = hello::unlock(&st.db)?;
+        let vk = header.unwrap_with_master(&mk)?;
+        header.verify_mac(&vk)?;
+        return Ok(vk);
+    }
     let meta = auth::load_metadata(&st.db)?.ok_or(Error::NotInitialized)?;
     let vk = RateLimiter::guarded(&st.db, || match cred.kind.as_str() {
         "master" => {
@@ -181,6 +202,12 @@ const QUICK_VERIFIER: &[u8] = b"dirshield-quick-lock-verifier";
 
 /// Authenticates access to a Quick-Locked folder.
 fn quick_verify(st: &AppState, row: &VaultRow, cred: &Credential) -> Result<()> {
+    if cred.kind == "hello" {
+        if row.key_mode != "master" {
+            return Err(Error::AuthFailed);
+        }
+        return hello::unlock(&st.db).map(|_| ());
+    }
     let secret = Zeroizing::new(cred.secret.clone());
     let meta = auth::load_metadata(&st.db)?.ok_or(Error::NotInitialized)?;
     RateLimiter::guarded(&st.db, || match cred.kind.as_str() {
@@ -218,7 +245,8 @@ fn store_quick_verifier(st: &AppState, id: &str, password: &str) -> Result<()> {
 /// Folders that must never be locked: system locations, profile roots and
 /// well-known folders, DirShield's own storage, and anything overlapping an
 /// already protected folder.
-fn validate_target(st: &AppState, mk: &[u8; 32], raw: &str) -> Result<PathBuf> {
+/// `except`: the vault whose own folder this is (when re-locking it).
+fn validate_target(st: &AppState, mk: &[u8; 32], raw: &str, except: Option<&str>) -> Result<PathBuf> {
     let p = fsutil::normalize(Path::new(raw))?;
     let meta = std::fs::symlink_metadata(&p)?;
     if !meta.is_dir() || scan::is_link(&meta) {
@@ -263,7 +291,7 @@ fn validate_target(st: &AppState, mk: &[u8; 32], raw: &str) -> Result<PathBuf> {
         return invalid("This folder contains the DirShield vault storage location.");
     }
     for r in all_vaults(st)? {
-        if r.status == "restored" {
+        if r.status == "restored" || Some(r.id.as_str()) == except {
             continue;
         }
         let i = info(st, mk, &r);
@@ -306,6 +334,10 @@ pub struct AppInfo {
     version: String,
     data_dir: String,
     default_vault_root: String,
+    /// Windows Hello is set up on this PC.
+    hello_available: bool,
+    /// Windows Hello unlock is turned on for DirShield.
+    hello: bool,
 }
 
 #[tauri::command]
@@ -321,6 +353,8 @@ pub async fn app_info(app: AppHandle) -> Result<AppInfo> {
             version: app.package_info().version.to_string(),
             data_dir: fsutil::display_path(&st.dirs.base),
             default_vault_root: fsutil::display_path(&default_vault_root(st)),
+            hello_available: hello::available(),
+            hello: hello::is_enabled(&st.db),
         })
     })
     .await
@@ -355,10 +389,48 @@ pub async fn login(app: AppHandle, password: String) -> Result<()> {
     .await
 }
 
+/// Signs in with Windows Hello instead of the master password.
+#[tauri::command]
+pub async fn login_hello(app: AppHandle) -> Result<()> {
+    run(&app, move |_, st| {
+        auth::load_metadata(&st.db)?.ok_or(Error::NotInitialized)?;
+        let mk = hello::unlock(&st.db)?;
+        st.session.unlock(mk);
+        st.db.log("sign_in_windows_hello", None, "success", None);
+        Ok(())
+    })
+    .await
+}
+
+/// Turns on Windows Hello unlock. Needs the master password once.
+#[tauri::command]
+pub async fn hello_enable(app: AppHandle, password: String) -> Result<()> {
+    run(&app, move |_, st| {
+        let password = Zeroizing::new(password);
+        st.session.master_active()?;
+        let mk = verify_master(st, &password)?;
+        hello::enable(&st.db, &mk)?;
+        st.db.log("windows_hello_on", None, "success", None);
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn hello_disable(app: AppHandle) -> Result<()> {
+    run(&app, move |_, st| {
+        st.session.master_active()?;
+        hello::disable(&st.db)?;
+        st.db.log("windows_hello_off", None, "success", None);
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn logout(app: AppHandle) -> Result<()> {
     run(&app, |app, st| {
-        st.session.lock();
+        st.lock_session();
         let _ = app.emit("session-locked", ());
         Ok(())
     })
@@ -368,6 +440,13 @@ pub async fn logout(app: AppHandle) -> Result<()> {
 #[tauri::command]
 pub fn touch(state: tauri::State<'_, AppState>) {
     state.session.touch();
+}
+
+/// Strength estimate for a password being chosen (meter in the UI). The same
+/// estimate gates new master passwords in `auth::validate_master_password`.
+#[tauri::command]
+pub fn password_strength(password: String) -> auth::PasswordStrength {
+    auth::password_strength(&Zeroizing::new(password))
 }
 
 #[tauri::command]
@@ -388,7 +467,7 @@ pub async fn reset_master_password(app: AppHandle, recovery_key: String, new_pas
     run(&app, move |_, st| {
         let rk = Zeroizing::new(recovery_key);
         let new_password = Zeroizing::new(new_password);
-        auth::validate_new_password(&new_password)?;
+        auth::validate_master_password(&new_password)?;
         let meta = auth::load_metadata(&st.db)?.ok_or(Error::NotInitialized)?;
         let mk = RateLimiter::guarded(&st.db, || auth::unwrap_master_with_recovery(&meta, &rk))?;
         auth::rewrap_master(&st.db, &mk, &new_password, KdfParams::new_default())?;
@@ -406,8 +485,8 @@ pub async fn reset_master_password(app: AppHandle, recovery_key: String, new_pas
 #[tauri::command]
 pub async fn scan_folder(app: AppHandle, path: String) -> Result<ScanReport> {
     run(&app, move |_, st| {
-        let mk = st.session.master()?;
-        let p = validate_target(st, &mk, &path)?;
+        let mk = st.session.master_active()?;
+        let p = validate_target(st, &mk, &path, None)?;
         scan::scan(&p, true)
     })
     .await
@@ -484,13 +563,12 @@ pub async fn vault_details(app: AppHandle, id: String) -> Result<VaultDetails> {
 // ---------------- Quick Lock ----------------
 
 #[tauri::command]
-pub async fn quick_lock(app: AppHandle, path: String, password: String, folder_password: Option<String>, hide: Option<bool>) -> Result<VaultInfo> {
+pub async fn quick_lock(app: AppHandle, path: String, credential: Credential, folder_password: Option<String>, hide: Option<bool>) -> Result<VaultInfo> {
     let hide = hide.unwrap_or(true);
     run(&app, move |app, st| {
-        let password = Zeroizing::new(password);
         let folder_password = folder_password.map(Zeroizing::new);
-        st.session.master()?;
-        let mk = verify_master(st, &password)?;
+        st.session.master_active()?;
+        let mk = master_from(st, &credential)?;
         quick_lock_impl(app, st, &mk, &path, folder_password.as_deref().map(|s| s.as_str()), hide)
     })
     .await
@@ -498,11 +576,14 @@ pub async fn quick_lock(app: AppHandle, path: String, password: String, folder_p
 
 /// Quick Lock with an already verified master key.
 fn quick_lock_impl(app: &AppHandle, st: &AppState, mk: &Key32, path: &str, folder_password: Option<&str>, hide: bool) -> Result<VaultInfo> {
+    if !cfg!(windows) {
+        return invalid("Quick Lock uses Windows file permissions and isn't available on this system. Use Secure Lock to encrypt the folder instead.");
+    }
     {
         if let Some(fp) = folder_password {
             auth::validate_new_password(fp)?;
         }
-        let src = validate_target(st, mk, path)?;
+        let src = validate_target(st, mk, path, None)?;
         let rep = scan::scan(&src, false)?;
         let id = crypto::random_id();
         let state = quicklock::lock(&src, Some(&st.dirs.quick_store), &id, hide, Some(&st.dirs.base))?;
@@ -542,7 +623,7 @@ fn quick_lock_impl(app: &AppHandle, st: &AppState, mk: &Key32, path: &str, folde
 #[tauri::command]
 pub async fn quick_unlock(app: AppHandle, id: String, credential: Credential, dest: Option<String>) -> Result<String> {
     run(&app, move |app, st| {
-        let mk = st.session.master()?;
+        let mk = st.session.master_active()?;
         let r = load_vault(st, &id)?;
         if r.mode != "quick" {
             return invalid("not a Quick Lock folder");
@@ -567,7 +648,7 @@ fn quick_unlock_core(app: &AppHandle, st: &AppState, r: &VaultRow, original: &Pa
 #[tauri::command]
 pub async fn quick_set_hidden(app: AppHandle, id: String, hidden: bool, credential: Credential) -> Result<()> {
     run(&app, move |app, st| {
-        st.session.master()?;
+        st.session.master_active()?;
         let r = load_vault(st, &id)?;
         if r.mode != "quick" {
             return invalid("not a Quick Lock folder");
@@ -630,12 +711,38 @@ fn quick_row_at(st: &AppState, path: &str) -> Result<Option<(VaultRow, QuickStat
     Ok(None)
 }
 
+/// True if DirShield has a Quick Lock record for the folder at `path`.
+pub(crate) fn has_quick_record(st: &AppState, path: &str) -> bool {
+    matches!(quick_row_at(st, path), Ok(Some(_)))
+}
+
+/// The prompt's action and folder ("" for Settings, which has none).
 fn prompt_action(st: &AppState) -> Result<(String, String)> {
-    let a = st.prompt.lock().unwrap().clone();
+    let a = st.prompt.lock().clone();
     match a {
         Some(ShellAction { action, path: Some(path) }) => Ok((action, path)),
+        Some(ShellAction { action, path: None }) if action == "settings" => Ok((action, String::new())),
         _ => invalid("Nothing to do."),
     }
+}
+
+/// Signs DirShield in with an already verified master key, then hands the
+/// prompt's action to the main window and closes the prompt.
+fn handoff_to_main(app: &AppHandle, st: &AppState, mk: Key32) {
+    st.session.unlock(mk);
+    st.db.log("sign_in", None, "success", Some("explorer menu"));
+    // The main window picks the action up after it sees the sign-in.
+    *st.pending.lock() = st.prompt.lock().take();
+    let _ = app.emit_to("main", "session-unlocked", ());
+    crate::show_main(app);
+    if let Some(w) = app.get_webview_window("prompt") {
+        let _ = w.close();
+    }
+}
+
+/// The prompt was opened by the uninstaller (`--confirm-uninstall`).
+fn is_uninstall_prompt(st: &AppState) -> bool {
+    crate::UNINSTALL_MODE.load(std::sync::atomic::Ordering::Relaxed) && st.prompt.lock().as_ref().is_some_and(|a| a.action == "uninstall")
 }
 
 fn folder_name(path: &str) -> String {
@@ -645,7 +752,13 @@ fn folder_name(path: &str) -> String {
 #[tauri::command]
 pub async fn prompt_info(app: AppHandle) -> Result<PromptInfo> {
     run(&app, move |_, st| {
+        if is_uninstall_prompt(st) {
+            return Ok(PromptInfo { action: "uninstall".into(), path: String::new(), name: "DirShield".into(), vault: None });
+        }
         let (action, path) = prompt_action(st)?;
+        if path.is_empty() {
+            return Ok(PromptInfo { action, path, name: "DirShield".into(), vault: None });
+        }
         let vault = quick_row_at(st, &path)?.map(|(r, q)| PromptVault { key_mode: r.key_mode, hidden: q.hidden });
         Ok(PromptInfo { action, name: folder_name(&path), path, vault })
     })
@@ -655,17 +768,37 @@ pub async fn prompt_info(app: AppHandle) -> Result<PromptInfo> {
 /// Runs the prompt's action with the password the user typed: the master
 /// password, or for unlock/unhide the folder's own password when it has one.
 #[tauri::command]
-pub async fn prompt_submit(app: AppHandle, password: String) -> Result<String> {
+pub async fn prompt_submit(app: AppHandle, password: String, use_hello: Option<bool>) -> Result<String> {
+    let use_hello = use_hello.unwrap_or(false);
     run(&app, move |app, st| {
         let password = Zeroizing::new(password);
+        let master = |st: &AppState| if use_hello { hello::unlock(&st.db) } else { verify_master(st, &password) };
+        if is_uninstall_prompt(st) {
+            verify_master(st, &password)?;
+            crate::UNINSTALL_CONFIRMED.store(true, std::sync::atomic::Ordering::Relaxed);
+            st.db.log("uninstall_confirmed", None, "success", None);
+            return Ok("Password confirmed. Uninstall will continue.".into());
+        }
         let (action, path) = prompt_action(st)?;
         let name = folder_name(&path);
+        // Actions finished in the main window: sign in here, continue there.
+        let quick = if path.is_empty() { None } else { quick_row_at(st, &path)? };
+        let handoff = match action.as_str() {
+            "secure-lock" | "settings" => true,
+            "unlock" | "unhide" => quick.is_none(),
+            _ => false,
+        };
+        if handoff {
+            let mk = verify_master(st, &password)?;
+            handoff_to_main(app, st, mk);
+            return Ok("Opening DirShield…".into());
+        }
         match action.as_str() {
             "lock" | "quick-lock" => {
                 if quick_row_at(st, &path)?.is_some() {
                     return invalid("This folder is already locked.");
                 }
-                let mk = verify_master(st, &password)?;
+                let mk = master(st)?;
                 let hide = action == "quick-lock";
                 quick_lock_impl(app, st, &mk, &path, None, hide)?;
                 Ok(if hide { format!("\u{201c}{name}\u{201d} is locked and hidden.") } else { format!("\u{201c}{name}\u{201d} is locked.") })
@@ -673,10 +806,12 @@ pub async fn prompt_submit(app: AppHandle, password: String) -> Result<String> {
             "unlock" | "unhide" => {
                 let (r, q) = quick_row_at(st, &path)?.ok_or_else(|| Error::NotFound("Quick Lock record for this folder".into()))?;
                 let mk = if r.key_mode == "master" {
-                    Some(verify_master(st, &password)?)
+                    Some(master(st)?)
+                } else if use_hello {
+                    return invalid("This folder has its own password. Type it to unlock.");
                 } else {
                     quick_verify(st, &r, &Credential { kind: "folder".into(), secret: password.to_string() })?;
-                    st.session.master().ok()
+                    st.session.master_active().ok()
                 };
                 if action == "unhide" {
                     quick_set_hidden_core(app, st, &r, false)?;
@@ -702,16 +837,24 @@ pub async fn prompt_submit(app: AppHandle, password: String) -> Result<String> {
 /// handle (Secure Lock folders, folders DirShield doesn't know).
 #[tauri::command]
 pub fn prompt_open_main(app: AppHandle, state: tauri::State<'_, AppState>) {
-    if let Some(a) = state.prompt.lock().unwrap().take() {
+    if let Some(a) = state.prompt.lock().take() {
         if state.session.is_unlocked() {
             let _ = app.emit_to("main", "shell-action", &a);
         } else {
-            *state.pending.lock().unwrap() = Some(a);
+            *state.pending.lock() = Some(a);
         }
     }
     crate::show_main(&app);
     if let Some(w) = app.get_webview_window("prompt") {
         let _ = w.close();
+    }
+}
+
+/// Main window size: compact while signed out, full once signed in.
+#[tauri::command]
+pub fn set_window_mode(app: AppHandle, full: bool, width: Option<f64>, height: Option<f64>) {
+    if let Some(w) = app.get_webview_window("main") {
+        crate::apply_window_mode(&w, full, width.zip(height));
     }
 }
 
@@ -721,7 +864,6 @@ pub fn prompt_close(app: AppHandle) {
         let _ = w.close();
     }
 }
-
 
 // ---------------- Secure Lock ----------------
 
@@ -764,16 +906,15 @@ fn spawn_encrypt(app: &AppHandle, st: &AppState, op_id: String, vault_id: String
 }
 
 #[tauri::command]
-pub async fn secure_lock(app: AppHandle, path: String, password: String, folder_password: Option<String>, vault_root: Option<String>) -> Result<String> {
+pub async fn secure_lock(app: AppHandle, path: String, credential: Credential, folder_password: Option<String>, vault_root: Option<String>) -> Result<String> {
     run(&app, move |app, st| {
-        let password = Zeroizing::new(password);
         let folder_password = folder_password.map(Zeroizing::new);
-        st.session.master()?;
-        let mk = verify_master(st, &password)?;
+        st.session.master_active()?;
+        let mk = master_from(st, &credential)?;
         if let Some(fp) = &folder_password {
             auth::validate_new_password(fp)?;
         }
-        let src = validate_target(st, &mk, &path)?;
+        let src = validate_target(st, &mk, &path, None)?;
         let root = vault_root.filter(|s| !s.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| default_vault_root(st));
         std::fs::create_dir_all(&root)?;
         let root = fsutil::normalize(&root)?;
@@ -812,7 +953,21 @@ pub async fn secure_lock(app: AppHandle, path: String, password: String, folder_
     .await
 }
 
-fn spawn_decrypt(app: &AppHandle, st: &AppState, op_id: String, vault_id: String, vault_dir: PathBuf, vk: Key32, p: DecryptParams, total_files: u64, total_bytes: u64) -> Result<()> {
+/// Runs a full restore, or a selective one ("extract") when `p.include` is
+/// set. `restored_enc` (encrypted destination) is recorded as the vault's
+/// restored location once a full restore finishes.
+fn spawn_decrypt(
+    app: &AppHandle,
+    st: &AppState,
+    op_id: String,
+    vault_id: String,
+    vault_dir: PathBuf,
+    vk: Key32,
+    p: DecryptParams,
+    restored_enc: Option<String>,
+    total_files: u64,
+    total_bytes: u64,
+) -> Result<()> {
     let db = st.db.clone();
     let db2 = st.db.clone();
     let app2 = app.clone();
@@ -820,23 +975,34 @@ fn spawn_decrypt(app: &AppHandle, st: &AppState, op_id: String, vault_id: String
     let vid = vault_id.clone();
     let opid = op_id.clone();
     let prev = p.prev_status.clone();
-    engine::set_vault_status(&st.db, &vault_id, "restoring")?;
+    let partial = p.is_partial();
+    let action = if partial { "extract" } else { "restore" };
+    if !partial {
+        engine::set_vault_status(&st.db, &vault_id, "restoring")?;
+    }
     engine::set_op_status(&st.db, &op_id, "running", None)?;
     st.ops.spawn(
         app.clone(),
         st.db.clone(),
         op_id,
         vault_id.clone(),
-        "decrypt",
+        if partial { "extract" } else { "decrypt" },
         total_files,
         total_bytes,
         move |ctrl| engine::run_decrypt(&engine::DecryptJob { db: &db, op_id: &opid, vault_id: &vid, vault_dir: &vault_dir, vk: &vk, params: &p, workers: w, ctrl }),
         move |r| {
             match r {
-                Ok(()) => db2.log("restore", Some(&vault_id), "success", None),
+                Ok(()) => {
+                    if let Some(enc) = &restored_enc {
+                        let _ = db2.lock().execute("UPDATE vaults SET restored_path=?2 WHERE id=?1", params![vault_id, enc]);
+                    }
+                    db2.log(action, Some(&vault_id), "success", None)
+                }
                 Err(e) => {
-                    let _ = engine::set_vault_status(&db2, &vault_id, &prev);
-                    db2.log("restore", Some(&vault_id), if matches!(e, Error::Cancelled) { "cancelled" } else { "failed" }, Some(&e.to_string()));
+                    if !partial {
+                        let _ = engine::set_vault_status(&db2, &vault_id, &prev);
+                    }
+                    db2.log(action, Some(&vault_id), if matches!(e, Error::Cancelled) { "cancelled" } else { "failed" }, Some(&e.to_string()));
                 }
             }
             emit_vaults_changed(&app2);
@@ -844,10 +1010,25 @@ fn spawn_decrypt(app: &AppHandle, st: &AppState, op_id: String, vault_id: String
     )
 }
 
+fn restored_enc(mk: &[u8; 32], vault_id: &str, dest: &str) -> String {
+    crypto::encrypt_text(&crypto::metadata_key(mk), dest, &aad(vault_id, "restored"))
+}
+
+/// Destination checks shared by restore and extract.
+fn check_dest(st: &AppState, r: &VaultRow, dest: &Path) -> Result<()> {
+    if !dest.is_absolute() {
+        return invalid("Choose an absolute destination path.");
+    }
+    if is_same_or_inside(dest, Path::new(&r.vault_path)) || is_same_or_inside(dest, &st.dirs.base) {
+        return invalid("Can't restore into DirShield's own storage.");
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn restore_vault(app: AppHandle, id: String, credential: Credential, dest: Option<String>, conflict: String) -> Result<String> {
     run(&app, move |app, st| {
-        let mk = st.session.master()?;
+        let mk = st.session.master_active()?;
         let r = load_vault(st, &id)?;
         if !matches!(r.status.as_str(), "encrypted" | "locked" | "restored") {
             return invalid("This vault is not complete and can't be restored. Resume or discard its operation first.");
@@ -862,13 +1043,8 @@ pub async fn restore_vault(app: AppHandle, id: String, credential: Credential, d
         let i = info(st, &mk, &r);
         let dest = dest.filter(|d| !d.trim().is_empty()).unwrap_or_else(|| i.original_path.clone());
         let dest_p = PathBuf::from(&dest);
-        if !dest_p.is_absolute() {
-            return invalid("Choose an absolute destination path.");
-        }
-        if is_same_or_inside(&dest_p, Path::new(&r.vault_path)) || is_same_or_inside(&dest_p, &st.dirs.base) {
-            return invalid("Can't restore into DirShield's own storage.");
-        }
-        let p = DecryptParams { dest: fsutil::display_path(&dest_p), conflict, prev_status: r.status.clone() };
+        check_dest(st, &r, &dest_p)?;
+        let p = DecryptParams { dest: fsutil::display_path(&dest_p), conflict, prev_status: r.status.clone(), ..Default::default() };
         let op_id = engine::create_operation(&st.db, &id, "decrypt", &serde_json::to_string(&p)?)?;
         let ctrl = engine::Control::default();
         if let Err(e) = engine::prepare_decrypt(&st.db, &op_id, Path::new(&r.vault_path), &vk, &p, &ctrl) {
@@ -876,7 +1052,223 @@ pub async fn restore_vault(app: AppHandle, id: String, credential: Credential, d
             return Err(e);
         }
         let (tf, tb): (i64, i64) = st.db.lock().query_row("SELECT total_files, total_bytes FROM operations WHERE id=?1", [&op_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        spawn_decrypt(app, st, op_id.clone(), id, PathBuf::from(&r.vault_path), vk, p, tf as u64, tb as u64)?;
+        let enc = restored_enc(&mk, &id, &p.dest);
+        close_browsers_for(st, &id);
+        spawn_decrypt(app, st, op_id.clone(), id, PathBuf::from(&r.vault_path), vk, p, Some(enc), tf as u64, tb as u64)?;
+        emit_vaults_changed(app);
+        Ok(op_id)
+    })
+    .await
+}
+
+// ---------------- Browse a vault, extract or open single files ----------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseInfo {
+    token: String,
+    name: String,
+    files: u64,
+    bytes: u64,
+}
+
+fn close_browsers_for(st: &AppState, vault_id: &str) {
+    let gone: Vec<_> = {
+        let mut m = st.browse.lock();
+        let keys: Vec<String> = m.iter().filter(|(_, s)| s.vault_id == vault_id).map(|(k, _)| k.clone()).collect();
+        keys.into_iter().filter_map(|k| m.remove(&k)).collect()
+    };
+    for s in gone {
+        for d in s.opened.lock().drain(..) {
+            browse::wipe_tree(&d);
+        }
+    }
+}
+
+fn browser(st: &AppState, token: &str) -> Result<std::sync::Arc<BrowseSession>> {
+    st.session.master_active()?;
+    st.browse.lock().get(token).cloned().ok_or_else(|| Error::NotFound("open vault (it was closed; open it again)".into()))
+}
+
+/// Decrypts a vault's manifest so its contents can be browsed. The vault key
+/// stays in memory until the browser is closed or DirShield locks.
+#[tauri::command]
+pub async fn browse_open(app: AppHandle, id: String, credential: Credential) -> Result<BrowseInfo> {
+    run(&app, move |_, st| {
+        st.session.master_active()?;
+        let r = load_vault(st, &id)?;
+        if r.mode != "secure" || !matches!(r.status.as_str(), "encrypted" | "locked" | "restored") {
+            return invalid("Only a completed Secure Lock vault can be browsed.");
+        }
+        if st.ops.is_vault_busy(&id) {
+            return Err(Error::Conflict("An operation is running for this vault.".into()));
+        }
+        let vk = secure_vault_key(st, &r, &credential)?;
+        let dir = PathBuf::from(&r.vault_path);
+        let index = VaultIndex::load(&dir, &vk)?;
+        let token = crypto::random_id();
+        let out = BrowseInfo { token: token.clone(), name: index.root_name.clone(), files: index.files, bytes: index.bytes };
+        st.browse.lock().insert(token, std::sync::Arc::new(BrowseSession { vault_id: id.clone(), vault_dir: dir, vk, index, opened: Default::default() }));
+        st.db.log("browse_vault", Some(&id), "success", None);
+        Ok(out)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn browse_list(app: AppHandle, token: String, dir: String) -> Result<Vec<BrowseEntry>> {
+    run(&app, move |_, st| browser(st, &token)?.index.list(&dir)).await
+}
+
+/// Restores the selected files and folders (all in folder `base`) into `dest`.
+#[tauri::command]
+pub async fn browse_extract(app: AppHandle, token: String, paths: Vec<String>, dest: String, conflict: String) -> Result<String> {
+    run(&app, move |app, st| {
+        let s = browser(st, &token)?;
+        if paths.is_empty() {
+            return invalid("Select at least one file or folder.");
+        }
+        if !matches!(conflict.as_str(), "fail" | "skip" | "rename") {
+            return invalid("invalid conflict option");
+        }
+        let r = load_vault(st, &s.vault_id)?;
+        if st.ops.is_vault_busy(&r.id) {
+            return Err(Error::Conflict("An operation is already running for this vault.".into()));
+        }
+        s.index.measure(&paths)?;
+        let dest_p = PathBuf::from(dest.trim());
+        check_dest(st, &r, &dest_p)?;
+        let base = paths[0].rfind('/').map(|i| paths[0][..i].to_string()).unwrap_or_default();
+        let p = DecryptParams { dest: fsutil::display_path(&dest_p), conflict, prev_status: r.status.clone(), include: paths, base };
+        let op_id = engine::create_operation(&st.db, &r.id, "extract", &serde_json::to_string(&p)?)?;
+        if let Err(e) = engine::prepare_decrypt(&st.db, &op_id, &s.vault_dir, &s.vk, &p, &engine::Control::default()) {
+            st.db.lock().execute("DELETE FROM operations WHERE id=?1", [&op_id])?;
+            return Err(e);
+        }
+        let (tf, tb): (i64, i64) = st.db.lock().query_row("SELECT total_files, total_bytes FROM operations WHERE id=?1", [&op_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        spawn_decrypt(app, st, op_id.clone(), r.id.clone(), s.vault_dir.clone(), Key32::new(*s.vk), p, None, tf as u64, tb as u64)?;
+        Ok(op_id)
+    })
+    .await
+}
+
+/// Decrypts one file into a private temp folder and opens it with its
+/// default app. The copy is read-only and is wiped when the vault browser
+/// closes, when DirShield locks or exits, or at the next start.
+#[tauri::command]
+pub async fn browse_open_file(app: AppHandle, token: String, path: String) -> Result<()> {
+    run(&app, move |_, st| {
+        let s = browser(st, &token)?;
+        if st.ops.is_vault_busy(&s.vault_id) {
+            return Err(Error::Conflict("An operation is running for this vault.".into()));
+        }
+        let f = s.index.file(&path)?;
+        if browse::is_executable(&f.name) {
+            return invalid("Programs and scripts aren't opened straight from a vault. Extract the file instead.");
+        }
+        let dir = browse::new_temp_dir(&st.dirs.temp)?;
+        let out = dir.join(&f.name);
+        if let Err(e) = s.index.decrypt_file(&s.vault_dir, &s.vk, &f, &out) {
+            browse::wipe_tree(&dir);
+            return Err(e);
+        }
+        s.opened.lock().push(dir);
+        let a = fsutil::get_attrs(&out).unwrap_or(0) & fsutil::RESTORABLE_ATTRS;
+        let _ = fsutil::set_attrs(&out, a | fsutil::FILE_ATTRIBUTE_READONLY);
+        // The path is a single argument (no shell interpretation).
+        std::process::Command::new("explorer.exe").arg(&out).spawn()?;
+        st.db.log("open_from_vault", Some(&s.vault_id), "success", None);
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn browse_close(app: AppHandle, token: String) -> Result<()> {
+    run(&app, move |_, st| {
+        if let Some(s) = st.browse.lock().remove(&token) {
+            for d in s.opened.lock().drain(..) {
+                browse::wipe_tree(&d);
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+// ---------------- Re-lock (update a vault, re-encrypting only changes) ----------------
+
+fn spawn_relock(app: &AppHandle, st: &AppState, op_id: String, vault_id: String, vault_dir: PathBuf, source: PathBuf, name: String, vk: Key32, total_files: u64, total_bytes: u64) -> Result<()> {
+    let db = st.db.clone();
+    let db2 = st.db.clone();
+    let app2 = app.clone();
+    let w = workers(st);
+    let vid = vault_id.clone();
+    let opid = op_id.clone();
+    let opid2 = op_id.clone();
+    engine::set_vault_status(&st.db, &vault_id, "relocking")?;
+    engine::set_op_status(&st.db, &op_id, "running", None)?;
+    st.ops.spawn(
+        app.clone(),
+        st.db.clone(),
+        op_id,
+        vault_id.clone(),
+        "relock",
+        total_files,
+        total_bytes,
+        move |ctrl| {
+            let original = fsutil::display_path(&source);
+            engine::run_relock(&EncryptJob { db: &db, op_id: &opid, vault_id: &vid, vault_dir: &vault_dir, source: &source, root_name: &name, original_path: &original, vk: &vk, workers: w, ctrl })
+        },
+        move |r| {
+            match r {
+                Ok(()) => db2.log("relock", Some(&vault_id), "success", None),
+                Err(e) => {
+                    let prev = engine::load_relock_params(&db2, &opid2).map(|p| p.prev_status).unwrap_or_default();
+                    let _ = engine::set_vault_status(&db2, &vault_id, if prev.is_empty() { "encrypted" } else { &prev });
+                    db2.log("relock", Some(&vault_id), if matches!(e, Error::Cancelled) { "cancelled" } else { "failed" }, Some(&e.to_string()));
+                }
+            }
+            emit_vaults_changed(&app2);
+        },
+    )
+}
+
+/// Locks a restored folder again (or refreshes a vault whose originals are
+/// still in place), encrypting only files that are new or changed. `source`
+/// defaults to where the vault was restored to.
+#[tauri::command]
+pub async fn relock_vault(app: AppHandle, id: String, credential: Credential, source: Option<String>, thorough: bool) -> Result<String> {
+    run(&app, move |app, st| {
+        let mk = st.session.master_active()?;
+        let r = load_vault(st, &id)?;
+        if r.mode != "secure" || !matches!(r.status.as_str(), "restored" | "encrypted") {
+            return invalid("Only a restored folder, or one whose originals are still in place, can be locked again.");
+        }
+        if st.ops.is_vault_busy(&id) {
+            return Err(Error::Conflict("An operation is already running for this folder.".into()));
+        }
+        let i = info(st, &mk, &r);
+        let default_src = if r.status == "restored" { i.restored_path.clone().unwrap_or_else(|| i.original_path.clone()) } else { i.original_path.clone() };
+        let raw = source.filter(|s| !s.trim().is_empty()).unwrap_or(default_src);
+        let src = validate_target(st, &mk, &raw, Some(&id))?;
+        if is_same_or_inside(Path::new(&r.vault_path), &src) {
+            return invalid("The vault is stored inside this folder. Move the vault first.");
+        }
+        let vk = secure_vault_key(st, &r, &credential)?;
+        close_browsers_for(st, &id);
+        let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let p = RelockParams { source: fsutil::display_path(&src), thorough, prev_status: r.status.clone(), ..Default::default() };
+        let op_id = engine::create_relock(&st.db, &id, Path::new(&r.vault_path), &vk, p, &engine::Control::default())?;
+        // From here on the vault describes this folder (it is what "Remove
+        // originals" will clean up once the update is sealed).
+        let mdk = crypto::metadata_key(&mk);
+        st.db.lock().execute(
+            "UPDATE vaults SET name=?2, original_path=?3, updated_at=?4 WHERE id=?1",
+            params![id, crypto::encrypt_text(&mdk, &name, &aad(&id, "name")), crypto::encrypt_text(&mdk, &fsutil::display_path(&src), &aad(&id, "path")), now_ms()],
+        )?;
+        let (tf, tb): (i64, i64) = st.db.lock().query_row("SELECT total_files, total_bytes FROM operations WHERE id=?1", [&op_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        spawn_relock(app, st, op_id.clone(), id, PathBuf::from(&r.vault_path), src, name, vk, tf as u64, tb as u64)?;
         emit_vaults_changed(app);
         Ok(op_id)
     })
@@ -886,7 +1278,7 @@ pub async fn restore_vault(app: AppHandle, id: String, credential: Credential, d
 #[tauri::command]
 pub async fn verify_vault(app: AppHandle, id: String, credential: Credential) -> Result<String> {
     run(&app, move |app, st| {
-        st.session.master()?;
+        st.session.master_active()?;
         let r = load_vault(st, &id)?;
         let vk = secure_vault_key(st, &r, &credential)?;
         let op_id = engine::create_operation(&st.db, &id, "verify", "{}")?;
@@ -922,7 +1314,7 @@ pub async fn verify_vault(app: AppHandle, id: String, credential: Credential) ->
 #[tauri::command]
 pub async fn remove_originals(app: AppHandle, id: String, credential: Credential, confirm_name: String) -> Result<String> {
     run(&app, move |app, st| {
-        let mk = st.session.master()?;
+        let mk = st.session.master_active()?;
         let r = load_vault(st, &id)?;
         if r.status != "encrypted" {
             return invalid("Originals can only be removed from a completed, verified vault.");
@@ -940,7 +1332,7 @@ pub async fn remove_originals(app: AppHandle, id: String, credential: Credential
         let root = PathBuf::from(&i.original_path);
         let vid = id.clone();
         let opid = op_id.clone();
-        let report: std::sync::Arc<std::sync::Mutex<Option<CleanupReport>>> = Default::default();
+        let report: std::sync::Arc<parking_lot::Mutex<Option<CleanupReport>>> = Default::default();
         let rep2 = report.clone();
         st.ops.spawn(
             app.clone(),
@@ -952,13 +1344,13 @@ pub async fn remove_originals(app: AppHandle, id: String, credential: Credential
             r.size as u64,
             move |ctrl| {
                 let rep = engine::remove_originals(&dir, &vk, &root, ctrl)?;
-                *rep2.lock().unwrap() = Some(rep);
+                *rep2.lock() = Some(rep);
                 Ok(())
             },
             move |res| {
                 match res {
                     Ok(()) => {
-                        let rep = report.lock().unwrap().clone().unwrap_or_default();
+                        let rep = report.lock().clone().unwrap_or_default();
                         let _ = engine::set_vault_status(&db, &vid, "locked");
                         let detail = serde_json::to_string(&rep).unwrap_or_default();
                         let _ = db.lock().execute("UPDATE operations SET params=?2 WHERE id=?1", params![opid, detail]);
@@ -980,7 +1372,7 @@ pub async fn remove_originals(app: AppHandle, id: String, credential: Credential
 #[tauri::command]
 pub async fn delete_vault(app: AppHandle, id: String, credential: Credential, confirm_name: String) -> Result<()> {
     run(&app, move |app, st| {
-        let mk = st.session.master()?;
+        let mk = st.session.master_active()?;
         let r = load_vault(st, &id)?;
         if r.mode != "secure" {
             return invalid("Quick-Locked folders are removed from DirShield by unlocking them.");
@@ -993,6 +1385,7 @@ pub async fn delete_vault(app: AppHandle, id: String, credential: Credential, co
             return invalid("Type the folder name exactly to confirm.");
         }
         secure_vault_key(st, &r, &credential)?;
+        close_browsers_for(st, &id);
         engine::discard_vault_storage(Path::new(&r.vault_path));
         let c = st.db.lock();
         c.execute("DELETE FROM operations WHERE vault_id=?1", [&id])?;
@@ -1009,21 +1402,26 @@ pub async fn delete_vault(app: AppHandle, id: String, credential: Credential, co
 #[tauri::command]
 pub async fn change_folder_password(app: AppHandle, id: String, credential: Credential, new_mode: String, new_password: Option<String>) -> Result<()> {
     run(&app, move |app, st| {
-        let mk = st.session.master()?;
+        let mk = st.session.master_active()?;
         let new_password = new_password.map(Zeroizing::new);
-        if new_mode == "password" {
-            auth::validate_new_password(new_password.as_deref().map(|s| s.as_str()).unwrap_or(""))?;
-        } else if new_mode != "master" {
-            return invalid("invalid mode");
-        }
+        // Some(password) exactly when switching to a folder password.
+        let new_pw: Option<&str> = match new_mode.as_str() {
+            "password" => {
+                let pw = new_password.as_deref().map(|s| s.as_str()).ok_or_else(|| Error::Invalid("A new folder password is required.".into()))?;
+                auth::validate_new_password(pw)?;
+                Some(pw)
+            }
+            "master" => None,
+            _ => return invalid("invalid mode"),
+        };
         let r = load_vault(st, &id)?;
         if st.ops.is_vault_busy(&id) {
             return Err(Error::Conflict("An operation is running for this folder.".into()));
         }
         if r.mode == "quick" {
             quick_verify(st, &r, &credential)?;
-            if new_mode == "password" {
-                store_quick_verifier(st, &id, new_password.as_ref().unwrap())?;
+            if let Some(pw) = new_pw {
+                store_quick_verifier(st, &id, pw)?;
             } else {
                 st.db.lock().execute("DELETE FROM vault_key_wrappers WHERE vault_id=?1 AND wrapper_type='quick_password'", [&id])?;
             }
@@ -1032,17 +1430,17 @@ pub async fn change_folder_password(app: AppHandle, id: String, credential: Cred
             let dir = PathBuf::from(&r.vault_path);
             let mut h = VaultHeader::read(&dir)?;
             let recovery: Vec<KeyWrapper> = h.wrappers.iter().filter(|w| matches!(w, KeyWrapper::RecoveryEscrow { .. })).cloned().collect();
-            let primary = if new_mode == "password" { header::password_wrapper(&h.vault_id, new_password.as_ref().unwrap(), &vk)? } else { header::master_wrapper(&h.vault_id, &mk, &vk) };
+            let primary = match new_pw {
+                Some(pw) => header::password_wrapper(&h.vault_id, pw, &vk)?,
+                None => header::master_wrapper(&h.vault_id, &mk, &vk),
+            };
             h.wrappers = std::iter::once(primary).chain(recovery).collect();
             h.compute_mac(&vk)?;
             h.write_atomic(&dir)?; // only the small header is rewritten; no data is re-encrypted
             let c = st.db.lock();
             c.execute("DELETE FROM vault_key_wrappers WHERE vault_id=?1", [&id])?;
             for w in &h.wrappers {
-                c.execute(
-                    "INSERT INTO vault_key_wrappers(vault_id, wrapper_type, wrapped_vault_key, created_at) VALUES(?1,?2,?3,?4)",
-                    params![id, w.kind(), serde_json::to_string(w)?, now_ms()],
-                )?;
+                c.execute("INSERT INTO vault_key_wrappers(vault_id, wrapper_type, wrapped_vault_key, created_at) VALUES(?1,?2,?3,?4)", params![id, w.kind(), serde_json::to_string(w)?, now_ms()])?;
             }
         }
         st.db.lock().execute("UPDATE vaults SET key_mode=?2, updated_at=?3 WHERE id=?1", params![id, new_mode, now_ms()])?;
@@ -1058,7 +1456,7 @@ pub async fn change_folder_password(app: AppHandle, id: String, credential: Cred
 #[tauri::command]
 pub async fn import_vault(app: AppHandle, path: String, recovery_key: String) -> Result<VaultInfo> {
     run(&app, move |app, st| {
-        let mk = st.session.master()?;
+        let mk = st.session.master_active()?;
         let rk = Zeroizing::new(recovery_key);
         let dir = fsutil::normalize(Path::new(&path))?;
         let mut h = VaultHeader::read(&dir)?;
@@ -1094,7 +1492,7 @@ pub async fn import_vault(app: AppHandle, path: String, recovery_key: String) ->
 #[tauri::command]
 pub async fn find_orphans(app: AppHandle) -> Result<Vec<quicklock::Orphan>> {
     run(&app, |_, st| {
-        st.session.master()?;
+        st.session.master_active()?;
         let ids: Vec<String> = all_vaults(st)?.into_iter().map(|r| r.id).collect();
         quicklock::find_orphans(&st.dirs.quick_store, &ids)
     })
@@ -1106,17 +1504,11 @@ pub async fn find_orphans(app: AppHandle) -> Result<Vec<quicklock::Orphan>> {
 pub async fn recover_orphan(app: AppHandle, id: String, password: String, dest: Option<String>) -> Result<String> {
     run(&app, move |_, st| {
         let password = Zeroizing::new(password);
-        st.session.master()?;
+        st.session.master_active()?;
         verify_master(st, &password)?;
         let ids: Vec<String> = all_vaults(st)?.into_iter().map(|r| r.id).collect();
-        let o = quicklock::find_orphans(&st.dirs.quick_store, &ids)?
-            .into_iter()
-            .find(|o| o.id == id)
-            .ok_or_else(|| Error::NotFound("orphaned folder".into()))?;
-        let dest = dest
-            .filter(|d| !d.trim().is_empty())
-            .or_else(|| o.original_path.clone())
-            .ok_or_else(|| Error::Invalid("Choose where to put this folder.".into()))?;
+        let o = quicklock::find_orphans(&st.dirs.quick_store, &ids)?.into_iter().find(|o| o.id == id).ok_or_else(|| Error::NotFound("orphaned folder".into()))?;
+        let dest = dest.filter(|d| !d.trim().is_empty()).or_else(|| o.original_path.clone()).ok_or_else(|| Error::Invalid("Choose where to put this folder.".into()))?;
         let dest = PathBuf::from(dest);
         if !dest.is_absolute() || is_same_or_inside(&dest, &st.dirs.base) {
             return invalid("Choose a destination outside DirShield's storage.");
@@ -1243,7 +1635,7 @@ pub async fn op_cancel(app: AppHandle, id: String) -> Result<()> {
 #[tauri::command]
 pub async fn op_resume(app: AppHandle, id: String, credential: Credential, mode: String) -> Result<()> {
     run(&app, move |app, st| {
-        let mk = st.session.master()?;
+        let mk = st.session.master_active()?;
         if st.ops.get(&id).is_some() {
             return Err(Error::Conflict("This operation is already running.".into()));
         }
@@ -1265,9 +1657,16 @@ pub async fn op_resume(app: AppHandle, id: String, credential: Credential, mode:
                 let i = info(st, &mk, &r);
                 spawn_encrypt(app, st, id.clone(), vault_id.clone(), PathBuf::from(&r.vault_path), PathBuf::from(&i.original_path), i.name, vk, tf as u64, tb as u64)?;
             }
-            "decrypt" => {
+            "decrypt" | "extract" => {
                 let p: DecryptParams = serde_json::from_str(params_json.as_deref().unwrap_or("{}"))?;
-                spawn_decrypt(app, st, id.clone(), vault_id.clone(), PathBuf::from(&r.vault_path), vk, p, tf as u64, tb as u64)?;
+                let enc = (!p.is_partial()).then(|| restored_enc(&mk, &vault_id, &p.dest));
+                spawn_decrypt(app, st, id.clone(), vault_id.clone(), PathBuf::from(&r.vault_path), vk, p, enc, tf as u64, tb as u64)?;
+            }
+            "relock" => {
+                let p = engine::load_relock_params(&st.db, &id)?;
+                let src = PathBuf::from(&p.source);
+                let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                spawn_relock(app, st, id.clone(), vault_id.clone(), PathBuf::from(&r.vault_path), src, name, vk, tf as u64, tb as u64)?;
             }
             _ => return invalid("This operation can't be resumed; start it again instead."),
         }
@@ -1284,7 +1683,7 @@ pub async fn op_resume(app: AppHandle, id: String, credential: Credential, mode:
 #[tauri::command]
 pub async fn op_discard(app: AppHandle, id: String) -> Result<()> {
     run(&app, move |app, st| {
-        st.session.master()?;
+        st.session.master_active()?;
         if st.ops.get(&id).is_some() {
             return Err(Error::Conflict("Cancel the operation first.".into()));
         }
@@ -1300,6 +1699,10 @@ pub async fn op_discard(app: AppHandle, id: String) -> Result<()> {
                     engine::discard_vault_storage(Path::new(&r.vault_path));
                     st.db.lock().execute("DELETE FROM vaults WHERE id=?1", [&vault_id])?;
                 }
+            }
+        } else if op_type == "relock" && status != "completed" {
+            if let Ok(r) = load_vault(st, &vault_id) {
+                engine::discard_relock(&st.db, &id, &vault_id, Path::new(&r.vault_path))?;
             }
         } else if op_type == "decrypt" && status != "completed" {
             if let Some(p) = params_json.and_then(|p| serde_json::from_str::<DecryptParams>(&p).ok()) {
@@ -1322,7 +1725,7 @@ pub async fn op_discard(app: AppHandle, id: String) -> Result<()> {
 #[tauri::command]
 pub async fn clear_finished_operations(app: AppHandle) -> Result<()> {
     run(&app, |app, st| {
-        st.session.master()?;
+        st.session.master_active()?;
         st.db.lock().execute("DELETE FROM operations WHERE status='completed'", [])?;
         let _ = app.emit("ops-changed", ());
         Ok(())
@@ -1382,7 +1785,7 @@ pub async fn list_activity(app: AppHandle, limit: i64) -> Result<Vec<Activity>> 
 #[tauri::command]
 pub async fn clear_activity(app: AppHandle) -> Result<()> {
     run(&app, |_, st| {
-        st.session.master()?;
+        st.session.master_active()?;
         st.db.lock().execute("DELETE FROM activity_logs", [])?;
         Ok(())
     })
@@ -1422,7 +1825,7 @@ pub async fn get_settings(app: AppHandle) -> Result<Settings> {
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<()> {
     run(&app, move |app, st| {
-        st.session.master()?;
+        st.session.master_active()?;
         if !matches!(settings.theme.as_str(), "system" | "light" | "dark") {
             return invalid("invalid theme");
         }
@@ -1463,13 +1866,13 @@ pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<()> {
 
 #[tauri::command]
 pub fn take_pending_action(state: tauri::State<'_, AppState>) -> Option<ShellAction> {
-    state.pending.lock().unwrap().take()
+    state.pending.lock().take()
 }
 
 #[tauri::command]
 pub async fn open_in_explorer(app: AppHandle, path: String) -> Result<()> {
     run(&app, move |_, st| {
-        st.session.master()?;
+        st.session.master_active()?;
         let p = PathBuf::from(&path);
         if !p.is_absolute() || !p.exists() {
             return invalid("That location doesn't exist.");

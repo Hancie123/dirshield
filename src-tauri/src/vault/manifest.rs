@@ -32,12 +32,7 @@ pub fn write_line<W: Write>(w: &mut W, line: &Line) -> Result<()> {
 
 /// Streams manifest lines to `f`, enforcing structure: a Head first, an End
 /// last whose counts match, and safe relative paths throughout.
-pub fn read_manifest<R: std::io::Read>(
-    r: R,
-    vk: &[u8; 32],
-    vault_id: &[u8; 16],
-    mut f: impl FnMut(Line) -> Result<()>,
-) -> Result<()> {
+pub fn read_manifest<R: std::io::Read>(r: R, vk: &[u8; 32], vault_id: &[u8; 16], mut f: impl FnMut(Line) -> Result<()>) -> Result<()> {
     let mut pending: Vec<u8> = Vec::new();
     let mut seen_head = false;
     let mut end: Option<(u64, u64, u64)> = None;

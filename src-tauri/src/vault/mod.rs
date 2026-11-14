@@ -9,6 +9,7 @@
 //! ```
 //! No original file or folder name appears anywhere in the vault directory.
 
+pub mod browse;
 pub mod engine;
 pub mod header;
 pub mod manifest;

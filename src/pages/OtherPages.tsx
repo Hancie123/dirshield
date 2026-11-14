@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ArrowImportRegular,
+  ArrowDownloadRegular,
   ColorRegular,
   DeleteRegular,
   FolderOpenRegular,
@@ -16,9 +17,11 @@ import {
 } from "@fluentui/react-icons";
 import { api, errMsg, type Activity, type Orphan, type Settings } from "../lib/api";
 import { Badge, FluentButton, FluentCard, FluentDialog, FluentPasswordInput, FluentSelect, FluentTable, FluentToggle, InfoBar, SectionHeader, SettingsRow, useNotify } from "../components/fluent";
-import { actionLabel, formatDate, passwordStrength } from "../lib/format";
+import { actionLabel, formatDate } from "../lib/format";
+import { masterStrongEnough, StrengthMeter, usePasswordStrength } from "../lib/strength";
 import { setThemePreference, useStore } from "../lib/store";
 import { pickFolder } from "../dialogs/shared";
+import { useUpdater } from "../lib/updater";
 
 // ---------------------------------------------------------------- Recovery
 
@@ -402,7 +405,8 @@ function ChangeMasterDialog({ onClose }: { onClose: () => void }) {
   const [np2, setNp2] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const ok = cur && np.length >= 8 && np === np2;
+  const npStrength = usePasswordStrength(np);
+  const ok = cur && np.length >= 8 && np === np2 && masterStrongEnough(npStrength);
   return (
     <FluentDialog
       open
@@ -437,7 +441,8 @@ function ChangeMasterDialog({ onClose }: { onClose: () => void }) {
     >
       <div className="flex flex-col gap-3">
         <FluentPasswordInput label="Current master password" value={cur} onChange={(e) => setCur(e.target.value)} />
-        <FluentPasswordInput label="New master password" value={np} onChange={(e) => setNp(e.target.value)} hint={np ? passwordStrength(np).label : "At least 8 characters"} />
+        <FluentPasswordInput label="New master password" value={np} onChange={(e) => setNp(e.target.value)} />
+        <StrengthMeter pw={np} strength={npStrength} master />
         <FluentPasswordInput label="Confirm new master password" value={np2} onChange={(e) => setNp2(e.target.value)} error={np2 && np !== np2 ? "Passwords don't match" : undefined} />
         <p className="t-caption text-[var(--text-2)]">Your recovery key stays the same. Folders with their own password aren't affected.</p>
         {err && <InfoBar severity="error">{err}</InfoBar>}
@@ -448,6 +453,37 @@ function ChangeMasterDialog({ onClose }: { onClose: () => void }) {
 
 // ---------------------------------------------------------------- About
 
+function UpdateRow() {
+  const { state, check, install } = useUpdater();
+  const { ops } = useStore();
+  const busy = ops.some((o) => o.live);
+  const description =
+    state.kind === "checking"
+      ? "Checking…"
+      : state.kind === "none"
+        ? "You're on the latest version."
+        : state.kind === "available"
+          ? `Version ${state.update.version} is available.`
+          : state.kind === "installing"
+            ? `Installing${state.pct != null ? ` — ${state.pct}%` : "…"}`
+            : state.kind === "error"
+              ? `Couldn't check for updates: ${state.message}`
+              : "Updates are signed and verified before they're installed.";
+  return (
+    <SettingsRow icon={<ArrowDownloadRegular />} title="Updates" description={description}>
+      {state.kind === "available" ? (
+        <FluentButton variant="accent" disabled={busy} onClick={install}>
+          Install and restart
+        </FluentButton>
+      ) : (
+        <FluentButton disabled={state.kind === "checking" || state.kind === "installing"} onClick={check}>
+          Check for updates
+        </FluentButton>
+      )}
+    </SettingsRow>
+  );
+}
+
 export function AboutPage() {
   const { info } = useStore();
   const facts: [string, string][] = [
@@ -456,10 +492,11 @@ export function AboutPage() {
     ["Secure Lock", "AES-256-GCM, 4 MiB authenticated chunks (STREAM), per-file HKDF-SHA256 keys"],
     ["Passwords", "Argon2id (64 MiB, 3 passes, 4 lanes) with unique random salts"],
     ["Recovery", "256-bit recovery key; vault keys escrowed with X25519"],
-    ["Storage", "Local only — no network access, no account"],
+    ["Storage", "Local only — no account, no cloud. The only network request is the update check to GitHub Releases."],
   ];
   return (
     <div className="flex flex-col gap-1">
+      <UpdateRow />
       <FluentCard className="p-5">
         <dl className="grid grid-cols-[160px_1fr] gap-y-2 gap-x-4">
           {facts.map(([k, v]) => (

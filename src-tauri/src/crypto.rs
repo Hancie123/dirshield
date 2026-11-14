@@ -6,7 +6,7 @@
 //! * HKDF-SHA256       – sub-key derivation from high-entropy keys
 //! * HMAC-SHA256       – vault header integrity
 //! * X25519 + HKDF     – recovery escrow ("sealed box") so a vault key can be
-//!                        wrapped for the recovery key without the recovery key being present
+//!   wrapped for the recovery key without the recovery key being present
 //! * OsRng             – all randomness (BCryptGenRandom on Windows)
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -98,9 +98,7 @@ pub fn derive_password_key(password: &str, p: &KdfParams) -> Result<Key32> {
     let params = Params::new(p.m_cost, p.t_cost, p.p_cost, Some(32)).map_err(|e| Error::Format(e.to_string()))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = Zeroizing::new([0u8; 32]);
-    argon
-        .hash_password_into(password.as_bytes(), &p.salt, out.as_mut())
-        .map_err(|e| Error::Format(e.to_string()))?;
+    argon.hash_password_into(password.as_bytes(), &p.salt, out.as_mut()).map_err(|e| Error::Format(e.to_string()))?;
     Ok(out)
 }
 
@@ -142,9 +140,7 @@ pub struct Sealed {
 pub fn seal(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Sealed {
     let cipher = Aes256Gcm::new(key.into());
     let nonce = random_bytes::<12>();
-    let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad })
-        .expect("AES-GCM encryption of a small buffer cannot fail");
+    let ct = cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad }).expect("AES-GCM encryption of a small buffer cannot fail");
     Sealed { nonce: nonce.to_vec(), ct }
 }
 
@@ -153,10 +149,7 @@ pub fn open(key: &[u8; 32], s: &Sealed, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>
         return Err(Error::Format("bad nonce length".into()));
     }
     let cipher = Aes256Gcm::new(key.into());
-    cipher
-        .decrypt(Nonce::from_slice(&s.nonce), Payload { msg: &s.ct, aad })
-        .map(Zeroizing::new)
-        .map_err(|_| Error::AuthFailed)
+    cipher.decrypt(Nonce::from_slice(&s.nonce), Payload { msg: &s.ct, aad }).map(Zeroizing::new).map_err(|_| Error::AuthFailed)
 }
 
 pub fn open_key(key: &[u8; 32], s: &Sealed, aad: &[u8]) -> Result<Key32> {

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, errMsg, type Credential, type ItemError, type KeyMode, type OperationInfo, type VaultDetails, type VaultInfo } from "../lib/api";
 import { FluentButton, FluentDialog, FluentInput, FluentPasswordInput, FluentRadio, FluentSpinner, InfoBar, useNotify } from "../components/fluent";
-import { formatBytes, formatCount, formatDate, passwordStrength, vaultStatusLabel } from "../lib/format";
+import { formatBytes, formatCount, formatDate, vaultStatusLabel } from "../lib/format";
+import { StrengthHint } from "../lib/strength";
 import { useStore } from "../lib/store";
 import { CredentialFields, defaultKind, KeyValue, OperationProgress } from "./shared";
 
@@ -218,7 +219,7 @@ export function ChangeFolderPasswordDialog({ vault }: { vault: VaultInfo }) {
           />
           {mode === "password" && (
             <div className="grid grid-cols-2 gap-3">
-              <FluentPasswordInput label="New folder password" value={pw} onChange={(e) => setPw(e.target.value)} hint={pw ? passwordStrength(pw).label : "At least 8 characters"} />
+              <FluentPasswordInput label="New folder password" value={pw} onChange={(e) => setPw(e.target.value)} hint={<StrengthHint pw={pw} />} />
               <FluentPasswordInput label="Confirm" value={pw2} onChange={(e) => setPw2(e.target.value)} error={pw2 && pw !== pw2 ? "Passwords don't match" : undefined} />
             </div>
           )}

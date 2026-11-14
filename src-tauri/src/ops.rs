@@ -3,9 +3,10 @@
 //! persists counters so a crash loses at most a couple of seconds of progress
 //! bookkeeping (the journal itself is authoritative).
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -50,7 +51,7 @@ impl ActiveOp {
         let total = c.total_bytes.load(Ordering::Relaxed);
         let paused = c.pause.load(Ordering::Relaxed);
         let speed = {
-            let mut s = self.sample.lock().unwrap();
+            let mut s = self.sample.lock();
             let dt = s.0.elapsed().as_secs_f64();
             if dt >= 1.0 {
                 let inst = processed.saturating_sub(s.1) as f64 / dt;
@@ -70,8 +71,8 @@ impl ActiveOp {
             vault_id: self.vault_id.clone(),
             op_type: self.op_type.clone(),
             status: if paused { "paused".into() } else { "running".into() },
-            phase: c.phase.lock().unwrap().clone(),
-            current: c.current.lock().unwrap().clone(),
+            phase: c.phase.lock().clone(),
+            current: c.current.lock().clone(),
             processed_bytes: processed,
             total_bytes: total,
             processed_files: c.processed_files.load(Ordering::Relaxed),
@@ -91,19 +92,19 @@ pub struct OpsManager {
 
 impl OpsManager {
     pub fn get(&self, id: &str) -> Option<Arc<ActiveOp>> {
-        self.active.lock().unwrap().get(id).cloned()
+        self.active.lock().get(id).cloned()
     }
 
     pub fn is_vault_busy(&self, vault_id: &str) -> bool {
-        self.active.lock().unwrap().values().any(|o| o.vault_id == vault_id)
+        self.active.lock().values().any(|o| o.vault_id == vault_id)
     }
 
     pub fn snapshots(&self) -> Vec<Progress> {
-        self.active.lock().unwrap().values().map(|o| o.snapshot()).collect()
+        self.active.lock().values().map(|o| o.snapshot()).collect()
     }
 
     pub fn any_active(&self) -> bool {
-        !self.active.lock().unwrap().is_empty()
+        !self.active.lock().is_empty()
     }
 
     /// Spawns `work` on a background thread. `done` runs on that thread after
@@ -116,17 +117,10 @@ impl OpsManager {
         if self.is_vault_busy(&vault_id) {
             return Err(Error::Conflict("Another operation is already running for this folder.".into()));
         }
-        let op = Arc::new(ActiveOp {
-            id: op_id.clone(),
-            vault_id,
-            op_type: op_type.into(),
-            ctrl: Control::default(),
-            started: Instant::now(),
-            sample: Mutex::new((Instant::now(), 0, 0.0)),
-        });
+        let op = Arc::new(ActiveOp { id: op_id.clone(), vault_id, op_type: op_type.into(), ctrl: Control::default(), started: Instant::now(), sample: Mutex::new((Instant::now(), 0, 0.0)) });
         op.ctrl.total_files.store(total_files, Ordering::Relaxed);
         op.ctrl.total_bytes.store(total_bytes, Ordering::Relaxed);
-        self.active.lock().unwrap().insert(op_id.clone(), op.clone());
+        self.active.lock().insert(op_id.clone(), op.clone());
         let me = self.clone();
         let _ = app.emit("ops-changed", ());
         std::thread::Builder::new()
@@ -147,7 +141,7 @@ impl OpsManager {
                     }
                 }
                 done(&r);
-                me.active.lock().unwrap().remove(&op_id);
+                me.active.lock().remove(&op_id);
                 let _ = app.emit("ops-changed", ());
             })
             .map_err(Error::Io)?;
@@ -168,7 +162,7 @@ impl OpsManager {
                 let _ = app.emit("op-progress", &snaps);
                 n += 1;
                 if n % 5 == 0 {
-                    for op in me.active.lock().unwrap().values() {
+                    for op in me.active.lock().values() {
                         let _ = engine::save_op_progress(&db, &op.id, &op.ctrl);
                         let status = if op.ctrl.pause.load(Ordering::Relaxed) { "paused" } else { "running" };
                         let _ = db.lock().execute("UPDATE operations SET status=?2 WHERE id=?1 AND status IN ('running','paused')", rusqlite::params![op.id, status]);

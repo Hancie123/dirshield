@@ -9,12 +9,12 @@
 //! every journaled item has been encrypted, written, flushed, re-read and
 //! verified, and the encrypted manifest has itself been verified.
 
+use parking_lot::Mutex;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use rusqlite::{params, OptionalExtension};
@@ -72,11 +72,11 @@ impl Control {
     }
 
     pub fn set_phase(&self, p: &str) {
-        *self.phase.lock().unwrap() = p.to_string();
+        *self.phase.lock() = p.to_string();
     }
 
     fn set_current(&self, c: &str) {
-        *self.current.lock().unwrap() = c.to_string();
+        *self.current.lock() = c.to_string();
     }
 }
 
@@ -154,16 +154,7 @@ fn load_pending(db: &Db, op_id: &str, after: i64) -> Result<Vec<Item>> {
     )?;
     let rows = st
         .query_map(params![op_id, after, PAGE], |r| {
-            Ok(Item {
-                item_id: r.get(0)?,
-                rel: r.get(1)?,
-                kind: r.get(2)?,
-                size: r.get::<_, i64>(3)? as u64,
-                mtime: r.get(4)?,
-                attrs: r.get(5)?,
-                blob_id: r.get(6)?,
-                sha256: r.get(7)?,
-            })
+            Ok(Item { item_id: r.get(0)?, rel: r.get(1)?, kind: r.get(2)?, size: r.get::<_, i64>(3)? as u64, mtime: r.get(4)?, attrs: r.get(5)?, blob_id: r.get(6)?, sha256: r.get(7)? })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
@@ -180,10 +171,7 @@ fn mark(db: &Db, op_id: &str, item: &Item, outcome: &Outcome) -> Result<()> {
             )?;
         }
         Outcome::Skipped(reason) => {
-            c.execute(
-                "UPDATE operation_journal SET status='skipped', error=?3, updated_at=?4 WHERE operation_id=?1 AND item_id=?2",
-                params![op_id, item.item_id, reason, now_ms()],
-            )?;
+            c.execute("UPDATE operation_journal SET status='skipped', error=?3, updated_at=?4 WHERE operation_id=?1 AND item_id=?2", params![op_id, item.item_id, reason, now_ms()])?;
         }
     }
     c.execute("UPDATE operations SET last_processed_item=MAX(COALESCE(last_processed_item,-1), ?2), updated_at=?3 WHERE id=?1", params![op_id, item.item_id, now_ms()])?;
@@ -191,10 +179,7 @@ fn mark(db: &Db, op_id: &str, item: &Item, outcome: &Outcome) -> Result<()> {
 }
 
 fn mark_error(db: &Db, op_id: &str, item: &Item, msg: &str) {
-    let _ = db.lock().execute(
-        "UPDATE operation_journal SET status='error', error=?3, updated_at=?4 WHERE operation_id=?1 AND item_id=?2",
-        params![op_id, item.item_id, msg, now_ms()],
-    );
+    let _ = db.lock().execute("UPDATE operation_journal SET status='error', error=?3, updated_at=?4 WHERE operation_id=?1 AND item_id=?2", params![op_id, item.item_id, msg, now_ms()]);
 }
 
 pub fn count_status(db: &Db, op_id: &str, status: &str) -> Result<u64> {
@@ -260,7 +245,7 @@ where
     std::thread::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| loop {
-                let item = match rx.lock().unwrap().recv() {
+                let item = match rx.lock().recv() {
                     Ok(i) => i,
                     Err(_) => break,
                 };
@@ -271,7 +256,7 @@ where
                 match f(&item) {
                     Ok(outcome) => {
                         if let Err(e) = mark(db, op_id, &item, &outcome) {
-                            *fatal.lock().unwrap() = Some(e);
+                            *fatal.lock() = Some(e);
                             ctrl.abort.store(true, Ordering::Relaxed);
                             continue;
                         }
@@ -285,7 +270,7 @@ where
                         ctrl.failed_files.fetch_add(1, Ordering::Relaxed);
                         if let Error::Io(io) = &e {
                             if fsutil::is_disk_full(io) {
-                                *fatal.lock().unwrap() = Some(Error::Invalid("The destination drive is full. Free up space, then resume the operation.".into()));
+                                *fatal.lock() = Some(Error::Invalid("The destination drive is full. Free up space, then resume the operation.".into()));
                                 ctrl.abort.store(true, Ordering::Relaxed);
                             }
                         }
@@ -298,7 +283,7 @@ where
             let page = match load_pending(db, op_id, last) {
                 Ok(p) => p,
                 Err(e) => {
-                    *fatal.lock().unwrap() = Some(e);
+                    *fatal.lock() = Some(e);
                     ctrl.abort.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -316,7 +301,7 @@ where
         drop(tx);
     });
     ctrl.abort.store(false, Ordering::Relaxed);
-    if let Some(e) = fatal.into_inner().unwrap() {
+    if let Some(e) = fatal.into_inner() {
         return Err(e);
     }
     if ctrl.cancel.load(Ordering::Relaxed) {
@@ -443,60 +428,15 @@ pub fn create_secure_vault(db: &Db, spec: NewVaultSpec, ctrl: &Control) -> Resul
         }
 
         // Journal every item up front so the operation is resumable.
-        ctrl.set_phase("Preparing");
-        let mut batch = Vec::with_capacity(BATCH);
-        let mut next_id = 0i64;
-        let (mut files, mut dirs, mut bytes, mut skipped) = (0u64, 0u64, 0u64, 0u64);
-        for entry in WalkDir::new(spec.source).follow_links(false).min_depth(1) {
-            if ctrl.stopped() {
-                return Err(Error::Cancelled);
-            }
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
-                }
-            };
-            let meta = match fs::symlink_metadata(entry.path()) {
-                Ok(m) => m,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
-                }
-            };
-            if is_link(&meta) || !(meta.is_dir() || meta.is_file()) {
-                skipped += 1;
-                continue;
-            }
-            let rel = rel_string(spec.source, entry.path())?;
-            let kind = if meta.is_dir() { "d" } else { "f" };
-            if kind == "d" {
-                dirs += 1;
-            } else {
-                files += 1;
-                bytes += meta.len();
-            }
-            batch.push(Item { item_id: next_id, rel, kind: kind.into(), size: if kind == "f" { meta.len() } else { 0 }, mtime: mtime_ns(&meta), attrs: fsutil::attrs(&meta), blob_id: None, sha256: None });
-            next_id += 1;
-            if batch.len() >= BATCH {
-                insert_items(db, &op_id, &batch)?;
-                batch.clear();
-            }
-        }
-        insert_items(db, &op_id, &batch)?;
-
-        let need = estimate_vault_bytes(files, dirs, bytes);
+        let t = journal_tree(db, &op_id, spec.source, ctrl, |_, _| Ok(false))?;
+        let need = estimate_vault_bytes(t.files, t.dirs, t.bytes);
         let free = fsutil::free_space(&vault_dir)?;
         if need > free {
             return Err(Error::InsufficientSpace { need, free });
         }
-        let p = serde_json::to_string(&EncryptParams { walk_skipped: skipped })?;
-        db.lock().execute(
-            "UPDATE operations SET total_files=?2, total_bytes=?3, params=?4 WHERE id=?1",
-            params![op_id, files as i64, bytes as i64, p],
-        )?;
-        db.lock().execute("UPDATE vaults SET size_bytes=?2, file_count=?3 WHERE id=?1", params![spec.vault_id, bytes as i64, files as i64])?;
+        let p = serde_json::to_string(&EncryptParams { walk_skipped: t.skipped })?;
+        db.lock().execute("UPDATE operations SET total_files=?2, total_bytes=?3, params=?4 WHERE id=?1", params![op_id, t.files as i64, t.bytes as i64, p])?;
+        db.lock().execute("UPDATE vaults SET size_bytes=?2, file_count=?3 WHERE id=?1", params![spec.vault_id, t.bytes as i64, t.files as i64])?;
         Ok(op_id)
     })();
     match result {
@@ -509,6 +449,64 @@ pub fn create_secure_vault(db: &Db, spec: NewVaultSpec, ctrl: &Control) -> Resul
             Err(e)
         }
     }
+}
+
+#[derive(Default)]
+struct WalkTotals {
+    files: u64,
+    dirs: u64,
+    bytes: u64,
+    skipped: u64,
+    /// Files (and their bytes) `reusable` expects to need no new encryption.
+    reusable_files: u64,
+    reusable_bytes: u64,
+}
+
+/// Walks `source` (never following links) and journals every folder and
+/// regular file as a pending item. `reusable(rel, meta)` says whether a file
+/// will probably reuse an existing encrypted object (used for the space estimate).
+fn journal_tree(db: &Db, op_id: &str, source: &Path, ctrl: &Control, mut reusable: impl FnMut(&str, &fs::Metadata) -> Result<bool>) -> Result<WalkTotals> {
+    ctrl.set_phase("Preparing");
+    let mut batch = Vec::with_capacity(BATCH);
+    let mut next_id = 0i64;
+    let mut t = WalkTotals::default();
+    for entry in WalkDir::new(source).follow_links(false).min_depth(1) {
+        if ctrl.stopped() {
+            return Err(Error::Cancelled);
+        }
+        let Ok(entry) = entry else {
+            t.skipped += 1;
+            continue;
+        };
+        let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+            t.skipped += 1;
+            continue;
+        };
+        if is_link(&meta) || !(meta.is_dir() || meta.is_file()) {
+            t.skipped += 1;
+            continue;
+        }
+        let rel = rel_string(source, entry.path())?;
+        let kind = if meta.is_dir() { "d" } else { "f" };
+        if kind == "d" {
+            t.dirs += 1;
+        } else {
+            t.files += 1;
+            t.bytes += meta.len();
+            if reusable(&rel, &meta)? {
+                t.reusable_files += 1;
+                t.reusable_bytes += meta.len();
+            }
+        }
+        batch.push(Item { item_id: next_id, rel, kind: kind.into(), size: if kind == "f" { meta.len() } else { 0 }, mtime: mtime_ns(&meta), attrs: fsutil::attrs(&meta), blob_id: None, sha256: None });
+        next_id += 1;
+        if batch.len() >= BATCH {
+            insert_items(db, op_id, &batch)?;
+            batch.clear();
+        }
+    }
+    insert_items(db, op_id, &batch)?;
+    Ok(t)
 }
 
 fn crypto_b64(b: &[u8]) -> String {
@@ -662,11 +660,7 @@ fn finalize_encrypt(job: &EncryptJob, mut header: VaultHeader, vid: &[u8; 16]) -
         }
         let name = e.file_name().to_string_lossy();
         let keep = match name.strip_suffix(".dsb") {
-            Some(id) => db
-                .lock()
-                .query_row("SELECT 1 FROM operation_journal WHERE operation_id=?1 AND blob_id=?2 AND status='done'", params![job.op_id, id], |_| Ok(()))
-                .optional()?
-                .is_some(),
+            Some(id) => db.lock().query_row("SELECT 1 FROM operation_journal WHERE operation_id=?1 AND blob_id=?2 AND status='done'", params![job.op_id, id], |_| Ok(())).optional()?.is_some(),
             None => false,
         };
         if !keep {
@@ -675,9 +669,44 @@ fn finalize_encrypt(job: &EncryptJob, mut header: VaultHeader, vid: &[u8; 16]) -
     }
     let _ = fs::remove_dir(objects.join("tmp"));
 
-    // 2. Write the encrypted manifest from the journal (streamed, bounded memory).
+    // 2 + 3. Encrypted manifest from the journal, verified against the objects.
+    let (tmp, _, files, bytes) = write_manifest(job, &header, vid)?;
+    fs::rename(&tmp, job.vault_dir.join(MANIFEST_FILE))?;
+
+    // 4. Commit point: atomically rewrite the header with sealed = true.
+    header.sealed = true;
+    header.compute_mac(job.vk)?;
+    header.write_atomic(job.vault_dir)?;
+
+    // 5. Record success and purge plaintext paths from the journal.
+    let walk_skipped: u64 = db
+        .lock()
+        .query_row("SELECT params FROM operations WHERE id=?1", [job.op_id], |r| r.get::<_, Option<String>>(0))?
+        .and_then(|p| serde_json::from_str::<EncryptParams>(&p).ok())
+        .map(|p| p.walk_skipped)
+        .unwrap_or(0);
+    let skipped = count_status(db, job.op_id, "skipped")? + walk_skipped;
+    let now = now_ms();
+    let mut c = db.lock();
+    let tx = c.transaction()?;
+    tx.execute(
+        "UPDATE vaults SET status='encrypted', size_bytes=?2, file_count=?3, skipped_count=?4, locked_at=?5, updated_at=?5 WHERE id=?1",
+        params![job.vault_id, bytes as i64, files as i64, skipped as i64, now],
+    )?;
+    tx.execute("UPDATE operations SET status='completed', processed_bytes=total_bytes, processed_files=?2, error=NULL, updated_at=?3 WHERE id=?1", params![job.op_id, files as i64, now])?;
+    tx.execute("DELETE FROM operation_journal WHERE operation_id=?1", [job.op_id])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Writes `manifest.dsb.tmp` from the journal's finished items (streamed,
+/// bounded memory), then re-reads it and checks that every object it names
+/// exists with the exact expected size. Returns (temp path, manifest blob id,
+/// files, bytes).
+fn write_manifest(job: &EncryptJob, header: &VaultHeader, vid: &[u8; 16]) -> Result<(PathBuf, [u8; 16], u64, u64)> {
+    let db = job.db;
     let tmp = job.vault_dir.join(format!("{MANIFEST_FILE}.tmp"));
-    let (mut w, _) = BlobWriter::new(BufWriter::with_capacity(READ_BUF, File::create(&tmp)?), job.vk, vid, BlobKind::Manifest, header.chunk_size)?;
+    let (mut w, manifest_id) = BlobWriter::new(BufWriter::with_capacity(READ_BUF, File::create(&tmp)?), job.vk, vid, BlobKind::Manifest, header.chunk_size)?;
     manifest::write_line(&mut w, &Line::Head { v: 1, root_name: job.root_name.into(), original_path: job.original_path.into(), created_utc: header.created_utc })?;
     let (mut dirs, mut files, mut bytes) = (0u64, 0u64, 0u64);
     let mut last = -1i64;
@@ -738,47 +767,421 @@ fn finalize_encrypt(job: &EncryptJob, mut header: VaultHeader, vid: &[u8; 16]) -
     if seen != files {
         return Err(Error::Integrity("manifest verification failed".into()));
     }
+    Ok((tmp, manifest_id, files, bytes))
+}
+
+/// Id of the blob currently stored as the vault's manifest (read from its
+/// plaintext blob header; no key needed). Used to detect whether a re-lock
+/// reached its commit point.
+pub fn current_manifest_id(vault_dir: &Path) -> Option<String> {
+    let mut h = [0u8; super::stream::HEADER_LEN];
+    File::open(vault_dir.join(MANIFEST_FILE)).ok()?.read_exact(&mut h).ok()?;
+    (&h[0..4] == super::stream::BLOB_MAGIC).then(|| hex::encode(&h[12..28]))
+}
+
+// ---------------------------------------------------------------------------
+// Re-lock: update a sealed vault from its folder, re-encrypting only changes
+// ---------------------------------------------------------------------------
+//
+// The sealed manifest's file entries are copied into `relock_base`. Each file
+// in the folder is compared with its entry: same size and modification time
+// (or, in thorough mode / when only the time differs, the same SHA-256) means
+// the existing encrypted object is reused as is. Everything else is encrypted
+// into new objects with new random ids, so nothing the live manifest refers
+// to is ever modified.
+//
+// Commit protocol: the new manifest's blob id is recorded in the operation
+// *before* the manifest is renamed over `manifest.dsb`; that rename is the
+// commit point. Whoever finishes the operation (this run, a resume, a discard
+// or crash recovery, which has no key) compares the id on disk with the
+// recorded one to know which side of the commit it is on.
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RelockParams {
+    pub source: String,
+    /// Compare contents (SHA-256) even when size and modification time match.
+    pub thorough: bool,
+    /// Vault status to return to if the re-lock is cancelled or discarded.
+    pub prev_status: String,
+    pub walk_skipped: u64,
+    /// Blob id of the new manifest; set just before the commit point.
+    pub manifest_id: Option<String>,
+    // Summary, filled in on completion.
+    pub unchanged_files: u64,
+    pub changed_files: u64,
+    pub added_files: u64,
+    pub removed_files: u64,
+}
+
+pub fn load_relock_params(db: &Db, op_id: &str) -> Result<RelockParams> {
+    let p: Option<String> = db.lock().query_row("SELECT params FROM operations WHERE id=?1", [op_id], |r| r.get(0))?;
+    Ok(serde_json::from_str(p.as_deref().unwrap_or("{}"))?)
+}
+
+fn save_relock_params(db: &Db, op_id: &str, p: &RelockParams) -> Result<()> {
+    db.lock().execute("UPDATE operations SET params=?2, updated_at=?3 WHERE id=?1", params![op_id, serde_json::to_string(p)?, now_ms()])?;
+    Ok(())
+}
+
+fn ensure_relock_open(db: &Db, op_id: &str) -> Result<()> {
+    let (ty, status): (String, String) = db.lock().query_row("SELECT operation_type, status FROM operations WHERE id=?1", [op_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if ty != "relock" || status == "completed" {
+        return Err(Error::Conflict("this update has already finished".into()));
+    }
+    Ok(())
+}
+
+fn relock_committed(p: &RelockParams, vault_dir: &Path) -> bool {
+    p.manifest_id.is_some() && p.manifest_id == current_manifest_id(vault_dir)
+}
+
+/// Prepares a re-lock of a sealed vault from `params.source`: records the
+/// current manifest as the baseline and journals the folder. Returns the
+/// operation id. Nothing in the vault changes until `run_relock` commits.
+pub fn create_relock(db: &Db, vault_id: &str, vault_dir: &Path, vk: &[u8; 32], mut params: RelockParams, ctrl: &Control) -> Result<String> {
+    let header = VaultHeader::read(vault_dir)?;
+    header.verify_mac(vk)?;
+    if !header.sealed {
+        return Err(Error::Integrity("this vault was never completed".into()));
+    }
+    let vid = header.vault_id_bytes()?;
+    let source = PathBuf::from(&params.source);
+    let meta = fs::symlink_metadata(&source).map_err(|_| Error::NotFound(format!("folder {}", params.source)))?;
+    if !meta.is_dir() || is_link(&meta) {
+        return Err(Error::Invalid("Select a regular folder (not a file, link or junction).".into()));
+    }
+    let op_id = create_operation(db, vault_id, "relock", &serde_json::to_string(&params)?)?;
+    let result = (|| -> Result<()> {
+        ctrl.set_phase("Reading vault");
+        let mut batch: Vec<(String, u64, Option<i64>, String, String, u64)> = Vec::with_capacity(BATCH);
+        let flush = |batch: &mut Vec<(String, u64, Option<i64>, String, String, u64)>| -> Result<()> {
+            let mut c = db.lock();
+            let tx = c.transaction()?;
+            {
+                let mut st = tx.prepare_cached("INSERT INTO relock_base(operation_id, path, size, mtime, blob_id, sha256, chunks) VALUES(?1,?2,?3,?4,?5,?6,?7)")?;
+                for (p, s, m, b, h, c) in batch.drain(..) {
+                    st.execute(params![op_id, p, s as i64, m, b, h, c as i64])?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        };
+        read_manifest(BufReader::new(File::open(vault_dir.join(MANIFEST_FILE))?), vk, &vid, |l| {
+            if ctrl.stopped() {
+                return Err(Error::Cancelled);
+            }
+            if let Line::File { p, s, m, b, h, c, .. } = l {
+                batch.push((p, s, m, b, h, c));
+                if batch.len() >= BATCH {
+                    flush(&mut batch)?;
+                }
+            }
+            Ok(())
+        })?;
+        flush(&mut batch)?;
+
+        let t = journal_tree(db, &op_id, &source, ctrl, |rel, meta| {
+            let base: Option<(i64, Option<i64>)> =
+                db.lock().query_row("SELECT size, mtime FROM relock_base WHERE operation_id=?1 AND path=?2", params![op_id, rel], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            Ok(matches!(base, Some((s, m)) if s as u64 == meta.len() && m == mtime_ns(meta)))
+        })?;
+        let need = estimate_vault_bytes(t.files - t.reusable_files, t.dirs, t.bytes - t.reusable_bytes);
+        let free = fsutil::free_space(vault_dir)?;
+        if need > free {
+            return Err(Error::InsufficientSpace { need, free });
+        }
+        params.walk_skipped = t.skipped;
+        save_relock_params(db, &op_id, &params)?;
+        db.lock().execute("UPDATE operations SET total_files=?2, total_bytes=?3 WHERE id=?1", params![op_id, t.files as i64, t.bytes as i64])?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(op_id),
+        Err(e) => {
+            // Nothing was written to the vault yet.
+            let _ = db.lock().execute("DELETE FROM operations WHERE id=?1", [&op_id]);
+            Err(e)
+        }
+    }
+}
+
+/// Runs (or resumes) a prepared re-lock. `job.source` is the folder being
+/// locked; `job.root_name` / `job.original_path` go into the new manifest.
+pub fn run_relock(job: &EncryptJob) -> Result<()> {
+    let header = VaultHeader::read(job.vault_dir)?;
+    header.verify_mac(job.vk)?;
+    if !header.sealed {
+        return Err(Error::Integrity("this vault was never completed".into()));
+    }
+    let vid = header.vault_id_bytes()?;
+    let mut p = load_relock_params(job.db, job.op_id)?;
+    if relock_committed(&p, job.vault_dir) {
+        return complete_relock(job.db, job.op_id, job.vault_id, job.vault_dir);
+    }
+    if !job.source.is_dir() {
+        return Err(Error::NotFound(format!("folder {}", job.source.display())));
+    }
+    fs::create_dir_all(job.vault_dir.join(OBJECTS_DIR).join("tmp"))?;
+    load_counters(job.db, job.op_id, job.ctrl)?;
+    job.ctrl.set_phase("Encrypting changes");
+    let chunk = header.chunk_size;
+    run_journal(job.db, job.op_id, job.ctrl, job.workers, |item| relock_item(job, &vid, chunk, p.thorough, item))?;
+    let failed = count_status(job.db, job.op_id, "error")?;
+    if failed > 0 {
+        return Err(Error::Invalid(format!("{failed} item(s) could not be encrypted. The vault still holds the previous version. Retry, or exclude these items.")));
+    }
+    job.ctrl.set_phase("Finalizing");
+    job.ctrl.set_current("");
+    // Leftovers of interrupted attempts: objects neither live nor finished here.
+    sweep_objects(job.db, job.op_id, job.vault_dir, true)?;
+    let (tmp, manifest_id, _, _) = write_manifest(job, &header, &vid)?;
+    p.manifest_id = Some(hex::encode(manifest_id));
+    save_relock_params(job.db, job.op_id, &p)?;
+    // Commit point.
     fs::rename(&tmp, job.vault_dir.join(MANIFEST_FILE))?;
+    complete_relock(job.db, job.op_id, job.vault_id, job.vault_dir)
+}
 
-    // 4. Commit point: atomically rewrite the header with sealed = true.
-    header.sealed = true;
-    header.compute_mac(job.vk)?;
-    header.write_atomic(job.vault_dir)?;
+fn relock_item(job: &EncryptJob, vid: &[u8; 16], chunk: u32, thorough: bool, item: &Item) -> Result<Outcome> {
+    if item.kind == "f" {
+        let base: Option<(i64, Option<i64>, String, String, i64)> = job
+            .db
+            .lock()
+            .query_row("SELECT size, mtime, blob_id, sha256, chunks FROM relock_base WHERE operation_id=?1 AND path=?2", params![job.op_id, item.rel], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()?;
+        if let Some((size, mtime, blob, sha, chunks)) = base {
+            if let Some(o) = try_reuse(job, chunk, thorough, item, size as u64, mtime, blob, sha, chunks as u64)? {
+                return Ok(o);
+            }
+        }
+    }
+    encrypt_item(job, vid, chunk, item)
+}
 
-    // 5. Record success and purge plaintext paths from the journal.
-    let walk_skipped: u64 = db
-        .lock()
-        .query_row("SELECT params FROM operations WHERE id=?1", [job.op_id], |r| r.get::<_, Option<String>>(0))?
-        .and_then(|p| serde_json::from_str::<EncryptParams>(&p).ok())
-        .map(|p| p.walk_skipped)
-        .unwrap_or(0);
-    let skipped = count_status(db, job.op_id, "skipped")? + walk_skipped;
+/// Reuses the existing encrypted object if the file is unchanged.
+fn try_reuse(job: &EncryptJob, chunk: u32, thorough: bool, item: &Item, size: u64, mtime: Option<i64>, blob: String, sha: String, chunks: u64) -> Result<Option<Outcome>> {
+    let src = job.source.join(safe_rel_path(&item.rel)?);
+    let Ok(before) = fs::symlink_metadata(&src) else { return Ok(None) };
+    if !before.is_file() || is_link(&before) || before.len() != size {
+        return Ok(None);
+    }
+    let object_ok = fs::metadata(blob_path(job.vault_dir, &blob)).map(|m| m.len() == blob_size(size, chunk)).unwrap_or(false);
+    if !object_ok {
+        return Ok(None);
+    }
+    let mut prog = ItemProgress::new(job.ctrl);
+    if thorough || mtime_ns(&before) != mtime {
+        let digest = match hash_file(&src, job.ctrl, &mut prog) {
+            Ok(d) => d,
+            Err(Error::Cancelled) => {
+                prog.rollback();
+                return Err(Error::Cancelled);
+            }
+            Err(_) => {
+                prog.rollback();
+                return Ok(None); // let encryption report the problem
+            }
+        };
+        let after = fs::symlink_metadata(&src)?;
+        if digest != sha || after.len() != before.len() || mtime_ns(&after) != mtime_ns(&before) {
+            prog.rollback();
+            return Ok(None);
+        }
+    }
+    prog.settle(size);
+    Ok(Some(Outcome::Done { blob_id: Some(blob), sha256: Some(sha), chunks: Some(chunks), size, mtime: mtime_ns(&before), attrs: fsutil::attrs(&before) }))
+}
+
+fn hash_file(p: &Path, ctrl: &Control, prog: &mut ItemProgress) -> Result<String> {
+    let mut f = File::open(p)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; READ_BUF];
+    loop {
+        ctrl.checkpoint()?;
+        let n = match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
+        h.update(&buf[..n]);
+        prog.add(n as u64);
+    }
+    Ok(hex::encode(h.finalize()))
+}
+
+/// Deletes stray files under `objects/`: temp files, and objects that are not
+/// referenced by a finished item of this operation (nor, with `keep_base`, by
+/// the re-lock baseline, i.e. the live manifest).
+fn sweep_objects(db: &Db, op_id: &str, vault_dir: &Path, keep_base: bool) -> Result<()> {
+    let objects = vault_dir.join(OBJECTS_DIR);
+    for e in WalkDir::new(&objects).min_depth(1).into_iter().filter_map(|e| e.ok()) {
+        if !e.file_type().is_file() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy();
+        let keep = match name.strip_suffix(".dsb") {
+            Some(id) => {
+                let c = db.lock();
+                let done = c.query_row("SELECT 1 FROM operation_journal WHERE operation_id=?1 AND blob_id=?2 AND status='done' LIMIT 1", params![op_id, id], |_| Ok(())).optional()?.is_some();
+                done || (keep_base && c.query_row("SELECT 1 FROM relock_base WHERE operation_id=?1 AND blob_id=?2 LIMIT 1", params![op_id, id], |_| Ok(())).optional()?.is_some())
+            }
+            None => false,
+        };
+        if !keep {
+            fs::remove_file(e.path())?;
+        }
+    }
+    let _ = fs::remove_dir(objects.join("tmp"));
+    Ok(())
+}
+
+/// Finishes a re-lock whose new manifest is in place: removes objects only
+/// the old manifest used and records the result. Needs no key, so crash
+/// recovery can run it.
+pub fn complete_relock(db: &Db, op_id: &str, vault_id: &str, vault_dir: &Path) -> Result<()> {
+    // The sweep keeps only objects named by this operation's journal, which is
+    // purged on completion: never run it twice.
+    ensure_relock_open(db, op_id)?;
+    sweep_objects(db, op_id, vault_dir, false)?;
+    let mut p = load_relock_params(db, op_id)?;
+    let (files, bytes, unchanged, changed, gone, skipped): (i64, i64, i64, i64, i64, i64) = db.lock().query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM operation_journal WHERE operation_id=?1 AND kind='f' AND status='done'),
+           (SELECT COALESCE(SUM(size),0) FROM operation_journal WHERE operation_id=?1 AND kind='f' AND status='done'),
+           (SELECT COUNT(*) FROM operation_journal j WHERE j.operation_id=?1 AND j.kind='f' AND j.status='done'
+              AND EXISTS(SELECT 1 FROM relock_base b WHERE b.operation_id=?1 AND b.blob_id=j.blob_id)),
+           (SELECT COUNT(*) FROM operation_journal j WHERE j.operation_id=?1 AND j.kind='f' AND j.status='done'
+              AND NOT EXISTS(SELECT 1 FROM relock_base b WHERE b.operation_id=?1 AND b.blob_id=j.blob_id)
+              AND EXISTS(SELECT 1 FROM relock_base b WHERE b.operation_id=?1 AND b.path=j.item_path_reference)),
+           (SELECT COUNT(*) FROM relock_base b WHERE b.operation_id=?1
+              AND NOT EXISTS(SELECT 1 FROM operation_journal j WHERE j.operation_id=?1 AND j.status='done' AND j.blob_id=b.blob_id)),
+           (SELECT COUNT(*) FROM operation_journal WHERE operation_id=?1 AND status='skipped')",
+        [op_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+    )?;
+    p.unchanged_files = unchanged as u64;
+    p.changed_files = changed as u64;
+    p.added_files = (files - unchanged - changed).max(0) as u64;
+    p.removed_files = (gone - changed).max(0) as u64;
     let now = now_ms();
     let mut c = db.lock();
     let tx = c.transaction()?;
     tx.execute(
-        "UPDATE vaults SET status='encrypted', size_bytes=?2, file_count=?3, skipped_count=?4, locked_at=?5, updated_at=?5 WHERE id=?1",
-        params![job.vault_id, bytes as i64, files as i64, skipped as i64, now],
+        "UPDATE vaults SET status='encrypted', size_bytes=?2, file_count=?3, skipped_count=?4, restored_path=NULL, locked_at=?5, updated_at=?5 WHERE id=?1",
+        params![vault_id, bytes, files, skipped + p.walk_skipped as i64, now],
     )?;
     tx.execute(
-        "UPDATE operations SET status='completed', processed_bytes=total_bytes, processed_files=?2, error=NULL, updated_at=?3 WHERE id=?1",
-        params![job.op_id, files as i64, now],
+        "UPDATE operations SET status='completed', processed_bytes=total_bytes, processed_files=?2, params=?3, error=NULL, updated_at=?4 WHERE id=?1",
+        params![op_id, files, serde_json::to_string(&p)?, now],
     )?;
-    tx.execute("DELETE FROM operation_journal WHERE operation_id=?1", [job.op_id])?;
+    tx.execute("DELETE FROM operation_journal WHERE operation_id=?1", [op_id])?;
+    tx.execute("DELETE FROM relock_base WHERE operation_id=?1", [op_id])?;
     tx.commit()?;
     Ok(())
+}
+
+/// Abandons an unfinished re-lock. Before the commit point the objects it
+/// wrote are deleted and the vault keeps its previous version; after it the
+/// update already took effect and is completed instead. Returns true if the
+/// vault was updated. The caller removes the operation row afterwards.
+pub fn discard_relock(db: &Db, op_id: &str, vault_id: &str, vault_dir: &Path) -> Result<bool> {
+    ensure_relock_open(db, op_id)?;
+    let p = load_relock_params(db, op_id)?;
+    if relock_committed(&p, vault_dir) {
+        complete_relock(db, op_id, vault_id, vault_dir)?;
+        return Ok(true);
+    }
+    // Keep exactly what the live manifest uses.
+    let objects = vault_dir.join(OBJECTS_DIR);
+    for e in WalkDir::new(&objects).min_depth(1).into_iter().filter_map(|e| e.ok()) {
+        if !e.file_type().is_file() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy();
+        let live = match name.strip_suffix(".dsb") {
+            Some(id) => db.lock().query_row("SELECT 1 FROM relock_base WHERE operation_id=?1 AND blob_id=?2 LIMIT 1", params![op_id, id], |_| Ok(())).optional()?.is_some(),
+            None => false,
+        };
+        if !live {
+            fs::remove_file(e.path())?;
+        }
+    }
+    let _ = fs::remove_dir(objects.join("tmp"));
+    let _ = fs::remove_file(vault_dir.join(format!("{MANIFEST_FILE}.tmp")));
+    set_vault_status(db, vault_id, if p.prev_status.is_empty() { "encrypted" } else { &p.prev_status })?;
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
 // Restore (decrypt)
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct DecryptParams {
     pub dest: String,
     /// "fail" | "skip" | "rename" – existing files are never overwritten.
     pub conflict: String,
     pub prev_status: String,
+    /// Selective restore ("extract"): manifest paths of the chosen files and
+    /// folders. Empty means the whole vault.
+    #[serde(default)]
+    pub include: Vec<String>,
+    /// Folder (manifest path, "" = vault root) that every `include` entry is
+    /// directly inside. Selected items land in `dest` relative to it, so
+    /// extracting "a/b/report.pdf" gives `<dest>/report.pdf`.
+    #[serde(default)]
+    pub base: String,
+}
+
+impl DecryptParams {
+    pub fn is_partial(&self) -> bool {
+        !self.include.is_empty()
+    }
+
+    /// For a selective restore: the destination-relative path of manifest
+    /// path `p`, or None if `p` is not selected (nor inside a selected folder).
+    fn select(&self, p: &str, include: &std::collections::HashSet<&str>) -> Option<String> {
+        if include.is_empty() {
+            return Some(p.to_string());
+        }
+        let mut cur = p;
+        let hit = loop {
+            if include.contains(cur) {
+                break true;
+            }
+            match cur.rfind('/') {
+                Some(i) => cur = &cur[..i],
+                None => break false,
+            }
+        };
+        if !hit {
+            return None;
+        }
+        if self.base.is_empty() {
+            Some(p.to_string())
+        } else {
+            p.strip_prefix(&self.base).and_then(|r| r.strip_prefix('/')).map(str::to_string)
+        }
+    }
+
+    /// Every selected path must sit directly inside `base` and be safe.
+    fn validate_selection(&self) -> Result<()> {
+        if !self.base.is_empty() {
+            safe_rel_path(&self.base)?;
+        }
+        for i in &self.include {
+            safe_rel_path(i)?;
+            let parent = i.rfind('/').map(|n| &i[..n]).unwrap_or("");
+            if parent != self.base {
+                return Err(Error::Invalid("selected items must all be in the same folder".into()));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn prepare_decrypt(db: &Db, op_id: &str, vault_dir: &Path, vk: &[u8; 32], p: &DecryptParams, ctrl: &Control) -> Result<()> {
@@ -795,6 +1198,9 @@ pub fn prepare_decrypt(db: &Db, op_id: &str, vault_dir: &Path, vk: &[u8; 32], p:
             return Err(Error::Conflict("the destination exists and is not a folder".into()));
         }
     }
+    p.validate_selection()?;
+    let include: std::collections::HashSet<&str> = p.include.iter().map(String::as_str).collect();
+    let mut matched = 0usize;
     let mut batch = Vec::with_capacity(BATCH);
     let mut next = 0i64;
     let (mut missing, mut conflicts, mut files, mut bytes) = (0u64, 0u64, 0u64, 0u64);
@@ -803,11 +1209,22 @@ pub fn prepare_decrypt(db: &Db, op_id: &str, vault_dir: &Path, vk: &[u8; 32], p:
         if ctrl.stopped() {
             return Err(Error::Cancelled);
         }
+        let line = match line {
+            Line::Dir { p: rel, a, m } => match p.select(&rel, &include) {
+                Some(out) => Line::Dir { p: out, a, m },
+                None => return Ok(()),
+            },
+            Line::File { p: rel, s, a, m, b, h, c } => match p.select(&rel, &include) {
+                Some(out) => Line::File { p: out, s, a, m, b, h, c },
+                None => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+        matched += 1;
         let item = match line {
             Line::Dir { p: rel, a, m } => Item { item_id: next, rel, kind: "d".into(), size: 0, mtime: m, attrs: a, blob_id: None, sha256: None },
             Line::File { p: rel, s, a, m, b, h, .. } => {
-                let ok = hex::decode(&b).map(|v| v.len() == 16).unwrap_or(false)
-                    && fs::metadata(blob_path(vault_dir, &b)).map(|md| md.len() == blob_size(s, header.chunk_size)).unwrap_or(false);
+                let ok = hex::decode(&b).map(|v| v.len() == 16).unwrap_or(false) && fs::metadata(blob_path(vault_dir, &b)).map(|md| md.len() == blob_size(s, header.chunk_size)).unwrap_or(false);
                 if !ok {
                     missing += 1;
                 }
@@ -832,11 +1249,16 @@ pub fn prepare_decrypt(db: &Db, op_id: &str, vault_dir: &Path, vk: &[u8; 32], p:
         Ok(())
     })?;
     insert_items(db, op_id, &batch)?;
+    if p.is_partial() && matched == 0 {
+        return Err(Error::NotFound("the selected items in this vault".into()));
+    }
     if missing > 0 {
         return Err(Error::Integrity(format!("{missing} encrypted object(s) are missing or damaged; nothing was restored")));
     }
     if conflicts > 0 {
-        return Err(Error::Conflict(format!("{conflicts} file(s) already exist at the destination (for example \"{conflict_sample}\"). Choose another location or a conflict option; files are never overwritten.")));
+        return Err(Error::Conflict(format!(
+            "{conflicts} file(s) already exist at the destination (for example \"{conflict_sample}\"). Choose another location or a conflict option; files are never overwritten."
+        )));
     }
     let free = fsutil::free_space(&dest)?;
     if bytes > free {
@@ -876,9 +1298,8 @@ pub fn run_decrypt(job: &DecryptJob) -> Result<()> {
     loop {
         let rows: Vec<(i64, String, Option<i64>, u32)> = {
             let c = job.db.lock();
-            let mut st = c.prepare_cached(
-                "SELECT item_id, item_path_reference, mtime, attrs FROM operation_journal WHERE operation_id=?1 AND kind='d' AND item_id<?2 ORDER BY item_id DESC LIMIT ?3",
-            )?;
+            let mut st =
+                c.prepare_cached("SELECT item_id, item_path_reference, mtime, attrs FROM operation_journal WHERE operation_id=?1 AND kind='d' AND item_id<?2 ORDER BY item_id DESC LIMIT ?3")?;
             let r = st.query_map(params![job.op_id, last, PAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             r
         };
@@ -897,7 +1318,9 @@ pub fn run_decrypt(job: &DecryptJob) -> Result<()> {
     let now = now_ms();
     let mut c = job.db.lock();
     let tx = c.transaction()?;
-    tx.execute("UPDATE vaults SET status='restored', updated_at=?2 WHERE id=?1", params![job.vault_id, now])?;
+    // Extracting a few files leaves the vault's state as it was.
+    let status = if job.params.is_partial() { job.params.prev_status.as_str() } else { "restored" };
+    tx.execute("UPDATE vaults SET status=?3, updated_at=?2 WHERE id=?1", params![job.vault_id, now, status])?;
     tx.execute("UPDATE operations SET status='completed', processed_bytes=total_bytes, error=NULL, updated_at=?2 WHERE id=?1", params![job.op_id, now])?;
     tx.execute("DELETE FROM operation_journal WHERE operation_id=?1", [job.op_id])?;
     tx.commit()?;

@@ -1,35 +1,41 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CopyRegular, KeyRegular, ShieldLockRegular } from "@fluentui/react-icons";
 import { api, errCode, errMsg } from "../lib/api";
 import { FluentButton, FluentCard, FluentCheckbox, FluentPasswordInput, InfoBar } from "../components/fluent";
-import { passwordStrength } from "../lib/format";
+import { masterStrongEnough, StrengthMeter, usePasswordStrength } from "../lib/strength";
 import { useStore } from "../lib/store";
 import logo from "../../src-tauri/icons/128x128.png";
 
+const SHELL_PAD = 24; // p-6 around the card
+
+/** Signed-out card. The window is sized to fit it (small sign-in window). */
 function Shell({ children, width = 460 }: { children: React.ReactNode; width?: number }) {
+  const card = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = card.current;
+    if (!el) return;
+    let last = "";
+    const fit = () => {
+      const h = Math.ceil(el.offsetHeight) + SHELL_PAD * 2;
+      const key = `${width}x${h}`;
+      if (key === last) return;
+      last = key;
+      api.setWindowMode(false, width + SHELL_PAD * 2, h).catch(() => {});
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [width]);
   return (
     <div className="h-full overflow-y-auto flex items-center justify-center p-6">
-      <FluentCard className="anim-page p-8 bg-[var(--dialog-bg)]!" style={{ width, maxWidth: "100%" }}>
-        {children}
-      </FluentCard>
+      <div ref={card} style={{ width, maxWidth: "100%" }}>
+        <FluentCard className="anim-page p-8 bg-[var(--dialog-bg)]!">{children}</FluentCard>
+      </div>
     </div>
   );
 }
 
-function StrengthMeter({ pw }: { pw: string }) {
-  const s = passwordStrength(pw);
-  const color = ["var(--critical)", "var(--critical)", "var(--caution)", "var(--success)", "var(--success)"][s.score];
-  return (
-    <div className="flex items-center gap-2">
-      <div className="flex gap-1 flex-1">
-        {[0, 1, 2, 3].map((i) => (
-          <span key={i} className="h-1 flex-1 rounded-full" style={{ background: i < s.score ? color : "var(--stroke-divider)" }} />
-        ))}
-      </div>
-      <span className="t-caption text-[var(--text-2)] w-16 text-right">{pw ? s.label : ""}</span>
-    </div>
-  );
-}
 
 export function SetupPage() {
   const { refreshInfo } = useStore();
@@ -41,6 +47,7 @@ export function SetupPage() {
   const [recovery, setRecovery] = useState("");
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
+  const strength = usePasswordStrength(pw);
 
   const create = async () => {
     setBusy(true);
@@ -90,14 +97,14 @@ export function SetupPage() {
 
   if (step === "password") {
     const mismatch = pw2.length > 0 && pw !== pw2;
-    const ok = pw.length >= 8 && pw === pw2;
+    const ok = pw.length >= 8 && pw === pw2 && masterStrongEnough(strength);
     return (
       <Shell>
         <h1 className="t-subtitle font-display">Create your master password</h1>
         <p className="mt-2 text-[var(--text-2)]">It unlocks DirShield and every folder that uses it. DirShield never stores it — choose something long you'll remember.</p>
         <div className="mt-5 flex flex-col gap-3">
           <FluentPasswordInput label="Master password" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus />
-          <StrengthMeter pw={pw} />
+          <StrengthMeter pw={pw} strength={strength} master />
           <FluentPasswordInput label="Confirm master password" value={pw2} onChange={(e) => setPw2(e.target.value)} error={mismatch ? "Passwords don't match" : undefined} onKeyDown={(e) => e.key === "Enter" && ok && create()} />
           {error && <InfoBar severity="error">{error}</InfoBar>}
         </div>
@@ -166,6 +173,7 @@ export function LoginPage() {
   const [rk, setRk] = useState("");
   const [np, setNp] = useState("");
   const [np2, setNp2] = useState("");
+  const npStrength = usePasswordStrength(np);
 
   useEffect(() => {
     if (lockout <= 0) return;
@@ -202,7 +210,7 @@ export function LoginPage() {
         <div className="mt-5 flex flex-col gap-3">
           <FluentPasswordInput label="Recovery key" value={rk} onChange={(e) => setRk(e.target.value)} placeholder="XXXX-XXXX-XXXX-…" autoFocus />
           <FluentPasswordInput label="New master password" value={np} onChange={(e) => setNp(e.target.value)} />
-          <StrengthMeter pw={np} />
+          <StrengthMeter pw={np} strength={npStrength} master />
           <FluentPasswordInput label="Confirm new master password" value={np2} onChange={(e) => setNp2(e.target.value)} error={np2 && np !== np2 ? "Passwords don't match" : undefined} />
           {error && <InfoBar severity="error">{error}</InfoBar>}
         </div>
@@ -210,7 +218,7 @@ export function LoginPage() {
           <FluentButton onClick={() => setForgot(false)} disabled={busy}>
             Back
           </FluentButton>
-          <FluentButton variant="accent" disabled={busy || locked || !rk || np.length < 8 || np !== np2} onClick={() => handle(() => api.resetMasterPassword(rk, np))}>
+          <FluentButton variant="accent" disabled={busy || locked || !rk || np.length < 8 || np !== np2 || !masterStrongEnough(npStrength)} onClick={() => handle(() => api.resetMasterPassword(rk, np))}>
             {busy ? "Working…" : "Reset password"}
           </FluentButton>
         </div>

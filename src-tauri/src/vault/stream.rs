@@ -89,7 +89,11 @@ pub fn blob_size(plain: u64, chunk: u32) -> u64 {
 }
 
 pub fn chunk_count(plain: u64, chunk: u32) -> u64 {
-    if plain == 0 { 1 } else { plain.div_ceil(chunk as u64) }
+    if plain == 0 {
+        1
+    } else {
+        plain.div_ceil(chunk as u64)
+    }
 }
 
 /// Streaming encryptor implementing `io::Write`. Memory use is one chunk.
@@ -111,19 +115,13 @@ impl<W: Write> BlobWriter<W> {
         inner.write_all(&header)?;
         let key = hkdf32(vault_key, &file_id, kind.label());
         let cipher = Aes256Gcm::new((&*key).into());
-        Ok((
-            Self { inner, cipher, vault_id: *vault_id, header, chunk: chunk as usize, buf: Vec::with_capacity(chunk as usize + TAG_LEN), index: 0, plain_total: 0 },
-            file_id,
-        ))
+        Ok((Self { inner, cipher, vault_id: *vault_id, header, chunk: chunk as usize, buf: Vec::with_capacity(chunk as usize + TAG_LEN), index: 0, plain_total: 0 }, file_id))
     }
 
     fn emit(&mut self, last: bool) -> io::Result<()> {
         let nonce = nonce_for(self.index, last);
         let aad = aad_for(&self.vault_id, &self.header, self.index, last);
-        let tag = self
-            .cipher
-            .encrypt_in_place_detached(Nonce::from_slice(&nonce), &aad, &mut self.buf)
-            .map_err(|_| io::Error::other("encryption failed"))?;
+        let tag = self.cipher.encrypt_in_place_detached(Nonce::from_slice(&nonce), &aad, &mut self.buf).map_err(|_| io::Error::other("encryption failed"))?;
         self.inner.write_all(&self.buf)?;
         self.inner.write_all(&tag)?;
         self.index = self.index.checked_add(1).ok_or_else(|| io::Error::other("chunk counter overflow"))?;

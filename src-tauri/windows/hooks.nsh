@@ -31,6 +31,20 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; Ask for the master password before removing anything. DirShield exits
+  ; with 0 when it is confirmed (or no master password exists yet) and 1 when
+  ; the user cancels. Silent runs (used by the installer when upgrading)
+  ; skip the check.
+  IfSilent ds_confirmed
+  IfFileExists "$INSTDIR\dirshield.exe" 0 ds_confirmed
+  ClearErrors
+  ExecWait '"$INSTDIR\dirshield.exe" --confirm-uninstall' $0
+  IfErrors ds_confirmed
+  StrCmp $0 "0" ds_confirmed
+  MessageBox MB_OK|MB_ICONEXCLAMATION "Uninstall was cancelled. DirShield's master password is required to uninstall it."
+  Abort "Uninstall cancelled: master password not confirmed."
+  ds_confirmed:
+
   DeleteRegKey HKCU "${DS_MENU}"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "DirShield"
   IfSilent +2

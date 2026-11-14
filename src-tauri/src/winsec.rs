@@ -28,13 +28,12 @@ mod imp {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
     use windows::Win32::Security::Authorization::{
-        GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, DENY_ACCESS, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID,
-        TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+        GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, DENY_ACCESS, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP,
+        TRUSTEE_W,
     };
     use windows::Win32::Security::{
-        CreateWellKnownSid, DeleteAce, EqualSid, GetAce, GetAclInformation, WinWorldSid, AclSizeInformation, ACCESS_DENIED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION,
-        DACL_SECURITY_INFORMATION, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-        UNPROTECTED_DACL_SECURITY_INFORMATION,
+        AclSizeInformation, CreateWellKnownSid, DeleteAce, EqualSid, GetAce, GetAclInformation, WinWorldSid, ACCESS_DENIED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
+        NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT, UNPROTECTED_DACL_SECURITY_INFORMATION,
     };
 
     const ACCESS_DENIED_ACE_TYPE: u8 = 1;
@@ -70,9 +69,7 @@ mod imp {
 
     fn set_dacl(path: &Path, dacl: *const ACL) -> Result<()> {
         let w = wide(path);
-        let rc = unsafe {
-            SetNamedSecurityInfoW(PCWSTR(w.as_ptr()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION, None, None, Some(dacl), None)
-        };
+        let rc = unsafe { SetNamedSecurityInfoW(PCWSTR(w.as_ptr()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION, None, None, Some(dacl), None) };
         if rc != ERROR_SUCCESS {
             return Err(Error::Win(format!("SetNamedSecurityInfo failed ({})", rc.0)));
         }

@@ -123,15 +123,3 @@ const actionLabels: Record<string, string> = {
 export function actionLabel(a: string): string {
   return actionLabels[a] ?? a.replace(/_/g, " ");
 }
-
-export function passwordStrength(pw: string): { score: number; label: string } {
-  let score = 0;
-  if (pw.length >= 8) score++;
-  if (pw.length >= 12) score++;
-  if (pw.length >= 16) score++;
-  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
-  if (/\d/.test(pw)) score++;
-  if (/[^A-Za-z0-9]/.test(pw)) score++;
-  const s = Math.min(4, Math.floor((score * 4) / 6));
-  return { score: s, label: ["Too weak", "Weak", "Fair", "Good", "Strong"][s] };
-}

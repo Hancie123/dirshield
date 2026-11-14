@@ -148,7 +148,7 @@ export interface Settings {
 }
 
 export interface PromptInfo {
-  action: "lock" | "quick-lock" | "unlock" | "unhide";
+  action: "lock" | "quick-lock" | "secure-lock" | "unlock" | "unhide" | "settings" | "uninstall";
   path: string;
   name: string;
   vault: { keyMode: "master" | "password"; hidden: boolean } | null;
@@ -171,6 +171,12 @@ export interface Credential {
   kind: CredentialKind;
   secret: string;
 }
+export interface PasswordStrength {
+  /** 0 (too guessable) ... 4 (very unguessable), zxcvbn */
+  score: number;
+  warning: string | null;
+  suggestions: string[];
+}
 export type ConflictPolicy = "fail" | "skip" | "rename";
 
 export const api = {
@@ -179,6 +185,7 @@ export const api = {
   login: (password: string) => invoke<void>("login", { password }),
   logout: () => invoke<void>("logout"),
   touch: () => invoke<void>("touch"),
+  passwordStrength: (password: string) => invoke<PasswordStrength>("password_strength", { password }),
   changeMasterPassword: (current: string, newPassword: string) => invoke<void>("change_master_password", { current, newPassword }),
   resetMasterPassword: (recoveryKey: string, newPassword: string) => invoke<void>("reset_master_password", { recoveryKey, newPassword }),
 
@@ -222,5 +229,6 @@ export const api = {
   promptSubmit: (password: string) => invoke<string>("prompt_submit", { password }),
   promptOpenMain: () => invoke<void>("prompt_open_main"),
   promptClose: () => invoke<void>("prompt_close"),
+  setWindowMode: (full: boolean, width?: number, height?: number) => invoke<void>("set_window_mode", { full, width, height }),
   openInExplorer: (path: string) => invoke<void>("open_in_explorer", { path }),
 };

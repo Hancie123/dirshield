@@ -1,6 +1,8 @@
 //! End-to-end tests of the Secure Lock engine on generated data in temp dirs.
 //! Never touches real user files.
 
+#![allow(clippy::type_complexity)]
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -67,17 +69,7 @@ fn setup(tree: impl FnOnce(&Path)) -> Fx {
     let wrappers = vec![header::password_wrapper_with(&vault_id, "folder-password", &vk, test_kdf()).unwrap()];
     let nv = engine::create_secure_vault(
         &db,
-        NewVaultSpec {
-            vault_id: &vault_id,
-            source: &source,
-            vault_root: &root.join("vaults"),
-            vk: &vk,
-            wrappers,
-            name_enc: "x".into(),
-            path_enc: "x".into(),
-            key_mode: "password",
-            chunk: CHUNK,
-        },
+        NewVaultSpec { vault_id: &vault_id, source: &source, vault_root: &root.join("vaults"), vk: &vk, wrappers, name_enc: "x".into(), path_enc: "x".into(), key_mode: "password", chunk: CHUNK },
         &Control::default(),
     )
     .unwrap();
@@ -105,7 +97,7 @@ fn encrypt(fx: &Fx, ctrl: &Control) -> Result<(), Error> {
 }
 
 fn restore(fx: &Fx, dest: &Path, conflict: &str) -> Result<String, Error> {
-    let p = DecryptParams { dest: dest.display().to_string(), conflict: conflict.into(), prev_status: "encrypted".into() };
+    let p = DecryptParams { dest: dest.display().to_string(), conflict: conflict.into(), prev_status: "encrypted".into(), ..Default::default() };
     let op = engine::create_operation(&fx.db, &fx.vault_id, "decrypt", &serde_json::to_string(&p).unwrap())?;
     engine::prepare_decrypt(&fx.db, &op, &fx.vault_dir, &fx.vk, &p, &Control::default())?;
     engine::run_decrypt(&DecryptJob { db: &fx.db, op_id: &op, vault_id: &fx.vault_id, vault_dir: &fx.vault_dir, vk: &fx.vk, params: &p, workers: 2, ctrl: &Control::default() })?;
@@ -187,10 +179,7 @@ fn wrong_password_and_recovery_and_password_change() {
     let salt = crypto::random_bytes::<16>();
     let rpub = crypto::recovery_public(&rk, &salt);
     let blobs_before = all_vault_bytes_and_names(&fx.vault_dir.join(OBJECTS_DIR)).0;
-    h.wrappers = vec![
-        header::password_wrapper_with(&h.vault_id, "new-password!", &fx.vk, test_kdf()).unwrap(),
-        header::recovery_wrapper(&h.vault_id, &rpub, "rid", &salt, &fx.vk).unwrap(),
-    ];
+    h.wrappers = vec![header::password_wrapper_with(&h.vault_id, "new-password!", &fx.vk, test_kdf()).unwrap(), header::recovery_wrapper(&h.vault_id, &rpub, "rid", &salt, &fx.vk).unwrap()];
     h.compute_mac(&fx.vk).unwrap();
     h.write_atomic(&fx.vault_dir).unwrap();
     let h = VaultHeader::read(&fx.vault_dir).unwrap();
@@ -286,7 +275,7 @@ fn interrupted_decryption_resumes() {
     });
     encrypt(&fx, &Control::default()).unwrap();
     let dest = fx.root.join("restored");
-    let p = DecryptParams { dest: dest.display().to_string(), conflict: "fail".into(), prev_status: "encrypted".into() };
+    let p = DecryptParams { dest: dest.display().to_string(), conflict: "fail".into(), prev_status: "encrypted".into(), ..Default::default() };
     let op = engine::create_operation(&fx.db, &fx.vault_id, "decrypt", "{}").unwrap();
     engine::prepare_decrypt(&fx.db, &op, &fx.vault_dir, &fx.vk, &p, &Control::default()).unwrap();
     let ctrl = Control::default();
@@ -410,4 +399,244 @@ fn insufficient_space_is_rejected_before_anything_is_written() {
     // portably, so verify the estimator is conservative instead.
     let est = dirshield_lib::vault::scan::estimate_vault_bytes(10, 2, 1_000_000);
     assert!(est > 1_000_000 + 10 * 44);
+}
+
+// ---------------------------------------------------------------------------
+// Selective restore (extract) and incremental re-lock
+// ---------------------------------------------------------------------------
+
+fn vault_status(fx: &Fx) -> String {
+    fx.db.lock().query_row("SELECT status FROM vaults WHERE id=?1", [&fx.vault_id], |r| r.get(0)).unwrap()
+}
+
+fn extract(fx: &Fx, dest: &Path, include: &[&str], base: &str) -> Result<String, Error> {
+    let p = DecryptParams {
+        dest: dest.display().to_string(),
+        conflict: "fail".into(),
+        prev_status: "encrypted".into(),
+        include: include.iter().map(|s| s.to_string()).collect(),
+        base: base.into(),
+    };
+    let op = engine::create_operation(&fx.db, &fx.vault_id, "extract", &serde_json::to_string(&p).unwrap())?;
+    engine::prepare_decrypt(&fx.db, &op, &fx.vault_dir, &fx.vk, &p, &Control::default())?;
+    engine::run_decrypt(&DecryptJob { db: &fx.db, op_id: &op, vault_id: &fx.vault_id, vault_dir: &fx.vault_dir, vk: &fx.vk, params: &p, workers: 2, ctrl: &Control::default() })?;
+    Ok(op)
+}
+
+fn objects(vault_dir: &Path) -> std::collections::BTreeSet<String> {
+    walkdir::WalkDir::new(vault_dir.join(OBJECTS_DIR)).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()).map(|e| e.file_name().to_string_lossy().into_owned()).collect()
+}
+
+fn relock(fx: &Fx, source: &Path, thorough: bool, ctrl: &Control) -> Result<String, Error> {
+    let p = engine::RelockParams { source: source.display().to_string(), thorough, prev_status: "restored".into(), ..Default::default() };
+    let op = engine::create_relock(&fx.db, &fx.vault_id, &fx.vault_dir, &fx.vk, p, &Control::default())?;
+    run_relock(fx, &op, source, ctrl)?;
+    Ok(op)
+}
+
+fn run_relock(fx: &Fx, op: &str, source: &Path, ctrl: &Control) -> Result<(), Error> {
+    let orig = source.display().to_string();
+    engine::run_relock(&EncryptJob {
+        db: &fx.db,
+        op_id: op,
+        vault_id: &fx.vault_id,
+        vault_dir: &fx.vault_dir,
+        source,
+        root_name: "My Secret Folder",
+        original_path: &orig,
+        vk: &fx.vk,
+        workers: 3,
+        ctrl,
+    })
+}
+
+#[test]
+fn extract_restores_only_the_selection() {
+    let fx = setup(make_tree);
+    encrypt(&fx, &Control::default()).unwrap();
+
+    // A top-level folder keeps its own name and contents.
+    let d1 = fx.root.join("x1");
+    extract(&fx, &d1, &["Ünïcödé 名前 🙂"], "").unwrap();
+    let (files, _) = snapshot(&d1);
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].0, "Ünïcödé 名前 🙂/nested/deep.txt");
+    assert_eq!(files[0].1, data(70_000, 3));
+
+    // A deep file lands directly in the destination.
+    let d2 = fx.root.join("x2");
+    extract(&fx, &d2, &["Ünïcödé 名前 🙂/nested/deep.txt"], "Ünïcödé 名前 🙂/nested").unwrap();
+    assert_eq!(snapshot(&d2).0.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["deep.txt"]);
+
+    // Several top-level files; the read-only attribute survives.
+    let d3 = fx.root.join("x3");
+    extract(&fx, &d3, &["a.txt", "readonly.txt"], "").unwrap();
+    let (files, _) = snapshot(&d3);
+    assert_eq!(files, vec![("a.txt".to_string(), b"hello".to_vec(), false), ("readonly.txt".to_string(), b"read only".to_vec(), true)]);
+
+    // Extracting leaves the vault state alone.
+    assert_eq!(vault_status(&fx), "encrypted");
+
+    // Bad selections are refused before anything is written.
+    let d4 = fx.root.join("x4");
+    assert!(matches!(extract(&fx, &d4, &["a.txt", "Ünïcödé 名前 🙂/nested/deep.txt"], ""), Err(Error::Invalid(_))));
+    assert!(matches!(extract(&fx, &d4, &["no such file"], ""), Err(Error::NotFound(_))));
+    assert!(matches!(extract(&fx, &d4, &["../escape"], ""), Err(Error::Integrity(_))));
+    assert!(!d4.exists());
+}
+
+#[test]
+fn relock_reencrypts_only_what_changed() {
+    let fx = setup(|s| {
+        for i in 0..12 {
+            write(&s.join("docs").join(format!("f{i}.bin")), &data(150_000 + i, i as u8));
+        }
+        write(&s.join("keep.txt"), b"unchanged");
+        write(&s.join("delete-me.txt"), b"to be deleted");
+        write(&s.join("edit-me.txt"), b"version 1");
+    });
+    encrypt(&fx, &Control::default()).unwrap();
+    let before = objects(&fx.vault_dir);
+    assert_eq!(before.len(), 15);
+
+    let work = fx.root.join("work");
+    restore(&fx, &work, "fail").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&work.join("edit-me.txt"), b"version 2, longer");
+    fs::remove_file(work.join("delete-me.txt")).unwrap();
+    write(&work.join("docs").join("new.txt"), b"brand new");
+
+    let op = relock(&fx, &work, false, &Control::default()).unwrap();
+    let p = engine::load_relock_params(&fx.db, &op).unwrap();
+    assert_eq!((p.unchanged_files, p.changed_files, p.added_files, p.removed_files), (13, 1, 1, 1));
+    assert_eq!(vault_status(&fx), "encrypted");
+
+    // The 13 unchanged files kept their encrypted objects; 2 new objects, 2 old ones gone.
+    let after = objects(&fx.vault_dir);
+    assert_eq!(after.len(), 15);
+    assert_eq!(before.intersection(&after).count(), 13);
+
+    // Journal and baseline (plaintext paths) are purged.
+    for t in ["operation_journal", "relock_base"] {
+        let n: i64 = fx.db.lock().query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "{t}");
+    }
+    engine::verify_vault(&fx.vault_dir, &fx.vk, &Control::default()).unwrap();
+    let check = fx.root.join("check");
+    restore(&fx, &check, "fail").unwrap();
+    assert_eq!(snapshot(&work), snapshot(&check));
+
+    // Finishing it a second time must never sweep the (now live) objects.
+    assert!(engine::complete_relock(&fx.db, &op, &fx.vault_id, &fx.vault_dir).is_err());
+    assert_eq!(objects(&fx.vault_dir), after);
+}
+
+#[test]
+fn relock_thorough_mode_catches_edits_that_keep_size_and_time() {
+    let fx = setup(|s| {
+        write(&s.join("a.txt"), b"AAAA");
+        write(&s.join("b.txt"), b"BBBB");
+    });
+    encrypt(&fx, &Control::default()).unwrap();
+    let work = fx.root.join("work");
+    restore(&fx, &work, "fail").unwrap();
+    let m = fs::metadata(work.join("a.txt")).unwrap().modified().unwrap();
+    write(&work.join("a.txt"), b"ZZZZ");
+    let f = fs::OpenOptions::new().write(true).open(work.join("a.txt")).unwrap();
+    f.set_modified(m).unwrap();
+    drop(f);
+
+    let op = relock(&fx, &work, true, &Control::default()).unwrap();
+    let p = engine::load_relock_params(&fx.db, &op).unwrap();
+    assert_eq!((p.unchanged_files, p.changed_files), (1, 1));
+    let check = fx.root.join("check");
+    restore(&fx, &check, "fail").unwrap();
+    assert_eq!(fs::read(check.join("a.txt")).unwrap(), b"ZZZZ");
+}
+
+#[test]
+fn interrupted_relock_keeps_the_old_version_and_can_be_discarded_or_resumed() {
+    let fx = setup(|s| {
+        for i in 0..30 {
+            write(&s.join(format!("f{i}.bin")), &data(90_000, i as u8));
+        }
+    });
+    encrypt(&fx, &Control::default()).unwrap();
+    let before = objects(&fx.vault_dir);
+    let manifest_before = engine::current_manifest_id(&fx.vault_dir).unwrap();
+    let work = fx.root.join("work");
+    restore(&fx, &work, "fail").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    for i in 0..30 {
+        write(&work.join(format!("f{i}.bin")), &data(90_001, 100 + i as u8));
+    }
+
+    let start = || {
+        let p = engine::RelockParams { source: work.display().to_string(), thorough: false, prev_status: "restored".into(), ..Default::default() };
+        engine::create_relock(&fx.db, &fx.vault_id, &fx.vault_dir, &fx.vk, p, &Control::default()).unwrap()
+    };
+    let cancel_midway = |op: &str| {
+        let ctrl = Control::default();
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                while ctrl.processed_files.load(Ordering::Relaxed) < 4 {
+                    std::thread::yield_now();
+                }
+                ctrl.cancel.store(true, Ordering::Relaxed);
+            });
+            assert!(matches!(run_relock(&fx, op, &work, &ctrl), Err(Error::Cancelled)));
+        });
+    };
+
+    // Cancelled: the vault still opens to the previous version.
+    let op = start();
+    cancel_midway(&op);
+    assert_eq!(engine::current_manifest_id(&fx.vault_dir).unwrap(), manifest_before);
+    let old = fx.root.join("old");
+    restore(&fx, &old, "fail").unwrap();
+    assert_eq!(snapshot(&old), snapshot(&fx.source));
+
+    // Discarded: exactly the old objects remain.
+    assert!(!engine::discard_relock(&fx.db, &op, &fx.vault_id, &fx.vault_dir).unwrap());
+    fx.db.lock().execute("DELETE FROM operations WHERE id=?1", [&op]).unwrap();
+    assert_eq!(objects(&fx.vault_dir), before);
+
+    // Interrupted again, then resumed to completion.
+    let op = start();
+    cancel_midway(&op);
+    run_relock(&fx, &op, &work, &Control::default()).unwrap();
+    assert_ne!(engine::current_manifest_id(&fx.vault_dir).unwrap(), manifest_before);
+    assert!(objects(&fx.vault_dir).is_disjoint(&before));
+    let check = fx.root.join("check");
+    restore(&fx, &check, "fail").unwrap();
+    assert_eq!(snapshot(&work), snapshot(&check));
+}
+
+#[test]
+fn browse_index_lists_folders_and_decrypts_single_files() {
+    use dirshield_lib::vault::browse::VaultIndex;
+    let fx = setup(make_tree);
+    encrypt(&fx, &Control::default()).unwrap();
+    let ix = VaultIndex::load(&fx.vault_dir, &fx.vk).unwrap();
+    assert_eq!(ix.root_name, "My Secret Folder");
+    assert_eq!(ix.files, 6);
+    let top = ix.list("").unwrap();
+    // Folders first, then files, by name.
+    let names: Vec<_> = top.iter().map(|e| (e.name.as_str(), e.dir)).collect();
+    assert_eq!(names[..3], [("empty dir", true), ("long_directory_name_segment_00_xxxxxxxx", true), ("Ünïcödé 名前 🙂", true)]);
+    assert!(names.contains(&("big (1).dat", false)));
+    let uni = top.iter().find(|e| e.name == "Ünïcödé 名前 🙂").unwrap();
+    assert_eq!((uni.files, uni.size), (1, 70_000));
+    assert_eq!(ix.list("Ünïcödé 名前 🙂/nested").unwrap()[0].path, "Ünïcödé 名前 🙂/nested/deep.txt");
+    assert!(ix.list("a.txt").is_err());
+    assert!(ix.list("missing").is_err());
+    assert_eq!(ix.measure(&["Ünïcödé 名前 🙂".into(), "a.txt".into()]).unwrap(), (2, 70_005));
+
+    let out = fx.root.join("one").join("big (1).dat");
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let f = ix.file("big (1).dat").unwrap();
+    ix.decrypt_file(&fx.vault_dir, &fx.vk, &f, &out).unwrap();
+    assert_eq!(fs::read(&out).unwrap(), data(1_000_003, 7));
+    // Never overwrites.
+    assert!(ix.decrypt_file(&fx.vault_dir, &fx.vk, &f, &out).is_err());
 }

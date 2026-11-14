@@ -99,6 +99,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     refreshInfo().catch(() => {});
   }, [refreshInfo]);
 
+  // Small window for sign-in, full size once signed in (and back on lock).
+  const wasUnlocked = useRef(false);
+  useEffect(() => {
+    if (unlocked === wasUnlocked.current) return;
+    wasUnlocked.current = unlocked;
+    if (unlocked) api.setWindowMode(true).catch(() => {});
+  }, [unlocked]);
+
   useEffect(() => {
     if (unlocked) {
       refresh();
@@ -149,11 +157,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setVaults([]);
       }),
       listen<ShellAction>("shell-action", (e) => handleAction(e.payload)),
+      // Signed in from the Explorer menu window; its action is waiting as the pending action.
+      listen("session-unlocked", () => refreshInfo().catch(() => {})),
     ];
     return () => {
       subs.forEach((p) => p.then((un) => un()));
     };
-  }, [refresh, handleAction]);
+  }, [refresh, refreshInfo, handleAction]);
 
   // Clear stale live progress when nothing is running anymore.
   useEffect(() => {

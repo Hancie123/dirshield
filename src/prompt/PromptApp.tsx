@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { CheckmarkCircleFilled, EyeRegular, LockClosedRegular, LockOpenRegular, EyeOffRegular } from "@fluentui/react-icons";
+import { CheckmarkCircleFilled, DeleteRegular, EyeRegular, LockClosedRegular, LockOpenRegular, EyeOffRegular, SettingsRegular, ShieldLockRegular } from "@fluentui/react-icons";
 import { api, errMsg, type PromptInfo } from "../lib/api";
 import { FluentButton, FluentPasswordInput, FluentSpinner, InfoBar } from "../components/fluent";
 import { applyTheme } from "../lib/store";
@@ -15,16 +15,33 @@ const TEXT: Record<string, { title: string; button: string; busy: string; icon: 
   "quick-lock": { title: "Lock and hide folder", button: "Lock and hide", busy: "Locking…", icon: <EyeOffRegular /> },
   unlock: { title: "Unlock folder", button: "Unlock", busy: "Unlocking…", icon: <LockOpenRegular /> },
   unhide: { title: "Unhide folder", button: "Unhide", busy: "Working…", icon: <EyeRegular /> },
+  uninstall: { title: "Uninstall DirShield", button: "Uninstall", busy: "Checking…", icon: <DeleteRegular /> },
+  "secure-lock": { title: "Secure Lock folder", button: "Continue", busy: "Signing in…", icon: <ShieldLockRegular /> },
+  settings: { title: "DirShield settings", button: "Continue", busy: "Signing in…", icon: <SettingsRegular /> },
 };
 
-type Blocker = { message: string; openMain: boolean } | null;
+/**
+ * Actions this window signs in for and then continues in DirShield: Secure
+ * Lock and Settings, and unlock/unhide of a folder that isn't Quick-Locked
+ * (a Secure Lock folder is restored in the app).
+ */
+function isHandoff(p: PromptInfo): boolean {
+  if (p.action === "secure-lock" || p.action === "settings") return true;
+  return (p.action === "unlock" || p.action === "unhide") && !p.vault;
+}
 
-/** Cases the prompt can't handle by itself. */
-function blocker(p: PromptInfo): Blocker {
+const HANDOFF_NOTE: Record<string, string> = {
+  "secure-lock": "Enter your master password. DirShield opens to choose the encryption options.",
+  settings: "Enter your master password to open DirShield's settings.",
+  unlock: "This folder isn't Quick-Locked. Enter your master password to continue in DirShield (Secure Lock folders are restored there).",
+  unhide: "This folder isn't Quick-Locked. Enter your master password to continue in DirShield.",
+};
+
+/** Cases the prompt can't handle at all. */
+function blocker(p: PromptInfo): string | null {
   const locking = p.action === "lock" || p.action === "quick-lock";
-  if (locking && p.vault) return { message: "This folder is already locked.", openMain: false };
-  if (!locking && !p.vault) return { message: "This folder isn't Quick-Locked here. Open DirShield to see its protection (Secure Lock folders are restored from the app).", openMain: true };
-  if (p.action === "unhide" && p.vault && !p.vault.hidden) return { message: "This folder isn't hidden.", openMain: false };
+  if (locking && p.vault) return "This folder is already locked.";
+  if (p.action === "unhide" && p.vault && !p.vault.hidden) return "This folder isn't hidden.";
   return null;
 }
 
@@ -86,6 +103,9 @@ export function PromptApp() {
 
   const t = TEXT[info?.action ?? "lock"] ?? TEXT.lock;
   const block = info ? blocker(info) : null;
+  const handoff = !!info && isHandoff(info);
+  const button = handoff ? "Continue" : t.button;
+  const busyText = handoff ? "Signing in…" : t.busy;
   const folderPw = info?.vault?.keyMode === "password" && (info.action === "unlock" || info.action === "unhide");
 
   return (
@@ -95,12 +115,19 @@ export function PromptApp() {
         <h1 className="t-subtitle font-display">{t.title}</h1>
       </div>
 
-      {info && (
-        <div className="min-w-0">
-          <div className="t-body-strong truncate">{info.name}</div>
-          <div className="t-caption text-[var(--text-2)] truncate selectable" title={info.path}>
-            {info.path}
-          </div>
+      {info?.action === "uninstall" ? (
+        <div className="t-body text-[var(--text-2)]">Enter your master password to confirm that you want to uninstall DirShield. Your vaults and locked folders are kept.</div>
+      ) : info && (
+        <div className="min-w-0 flex flex-col gap-2">
+          {info.path && (
+            <div className="min-w-0">
+              <div className="t-body-strong truncate">{info.name}</div>
+              <div className="t-caption text-[var(--text-2)] truncate selectable" title={info.path}>
+                {info.path}
+              </div>
+            </div>
+          )}
+          {handoff && !block && <div className="t-caption text-[var(--text-2)]">{HANDOFF_NOTE[info.action]}</div>}
         </div>
       )}
 
@@ -110,7 +137,7 @@ export function PromptApp() {
           <span>{done}</span>
         </div>
       ) : block ? (
-        <InfoBar severity="info">{block.message}</InfoBar>
+        <InfoBar severity="info">{block}</InfoBar>
       ) : (
         info && (
           <FluentPasswordInput
@@ -128,23 +155,16 @@ export function PromptApp() {
 
       <div className="mt-auto flex justify-end gap-2">
         {done ? null : block ? (
-          <>
-            {block.openMain && (
-              <FluentButton variant="accent" onClick={() => api.promptOpenMain()}>
-                Open DirShield
-              </FluentButton>
-            )}
-            <FluentButton onClick={() => api.promptClose()}>Close</FluentButton>
-          </>
+          <FluentButton onClick={() => api.promptClose()}>Close</FluentButton>
         ) : (
           <>
             <FluentButton variant="accent" disabled={!password || busy || !info} onClick={submit}>
               {busy ? (
                 <span className="flex items-center gap-2">
-                  <FluentSpinner size={14} /> {t.busy}
+                  <FluentSpinner size={14} /> {busyText}
                 </span>
               ) : (
-                t.button
+                button
               )}
             </FluentButton>
             <FluentButton disabled={busy} onClick={() => api.promptClose()}>

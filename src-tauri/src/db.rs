@@ -6,8 +6,9 @@
 //! master key. Journal rows contain relative paths only while an operation is
 //! running and are purged once it completes.
 
+use parking_lot::{Mutex, MutexGuard};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -101,6 +102,23 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX activity_time ON activity_logs(created_at DESC);
     "#,
+    // v2: incremental re-lock + where a vault was last restored to
+    r#"
+    -- The sealed manifest's file entries, copied in while a re-lock runs so
+    -- unchanged files can reuse their encrypted objects. Purged on completion.
+    CREATE TABLE relock_base (
+        operation_id TEXT NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        mtime INTEGER,
+        blob_id TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        chunks INTEGER NOT NULL,
+        PRIMARY KEY(operation_id, path)
+    ) WITHOUT ROWID;
+    CREATE INDEX relock_base_blob ON relock_base(operation_id, blob_id);
+    ALTER TABLE vaults ADD COLUMN restored_path TEXT; -- encrypted
+    "#,
 ];
 
 pub fn now_ms() -> i64 {
@@ -121,7 +139,7 @@ impl Db {
     }
 
     pub fn lock(&self) -> MutexGuard<'_, Connection> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner())
+        self.0.lock()
     }
 
     fn migrate(&self) -> Result<()> {
@@ -160,9 +178,6 @@ impl Db {
     // ---------------- activity ----------------
     pub fn log(&self, action: &str, vault_id: Option<&str>, status: &str, detail: Option<&str>) {
         // Activity logging must never break an operation.
-        let _ = self.lock().execute(
-            "INSERT INTO activity_logs(action, vault_id, status, detail, created_at) VALUES(?1,?2,?3,?4,?5)",
-            params![action, vault_id, status, detail, now_ms()],
-        );
+        let _ = self.lock().execute("INSERT INTO activity_logs(action, vault_id, status, detail, created_at) VALUES(?1,?2,?3,?4,?5)", params![action, vault_id, status, detail, now_ms()]);
     }
 }

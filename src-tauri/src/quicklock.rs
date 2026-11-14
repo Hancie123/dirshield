@@ -114,7 +114,11 @@ pub fn lock(original: &Path, store: Option<&Path>, id: &str, hide: bool, icon_di
         return Err(e);
     }
     let search_rule = if moved { false } else { search::exclude(&current) };
-    fsutil::notify_shell_changed(original);
+    if icon {
+        foldericon::refresh_explorer(original);
+    } else {
+        fsutil::notify_shell_changed(original);
+    }
     Ok(QuickState { current_path: fsutil::display_path(&current), moved, prev_attrs, hidden: hide, search_rule, tree_marked: true, kept_not_indexed, icon })
 }
 
@@ -162,7 +166,11 @@ pub fn unlock(state: &QuickState, original: &Path, dest: Option<&Path>) -> Resul
     if state.tree_marked {
         search::unmark_tree_not_indexed(&final_path, &state.kept_not_indexed);
     }
-    fsutil::notify_shell_changed(&final_path);
+    if state.icon {
+        foldericon::refresh_explorer(&final_path);
+    } else {
+        fsutil::notify_shell_changed(&final_path);
+    }
     Ok(final_path)
 }
 
@@ -245,7 +253,16 @@ pub fn find_orphans(store: &Path, known_ids: &[String]) -> Result<Vec<Orphan>> {
 
 /// Returns an orphaned folder to `dest` (never overwriting anything there).
 pub fn recover_orphan(store: &Path, o: &Orphan, dest: &Path) -> Result<PathBuf> {
-    let state = QuickState { current_path: o.stored_path.clone(), moved: true, prev_attrs: o.prev_attrs & !FILE_ATTRIBUTE_SYSTEM, hidden: true, search_rule: false, tree_marked: false, kept_not_indexed: Vec::new(), icon: false };
+    let state = QuickState {
+        current_path: o.stored_path.clone(),
+        moved: true,
+        prev_attrs: o.prev_attrs & !FILE_ATTRIBUTE_SYSTEM,
+        hidden: true,
+        search_rule: false,
+        tree_marked: false,
+        kept_not_indexed: Vec::new(),
+        icon: false,
+    };
     let p = unlock(&state, dest, None)?;
     let _ = fs::remove_file(sidecar_path(store, &o.id));
     Ok(p)

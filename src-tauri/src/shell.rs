@@ -106,8 +106,10 @@ pub fn context_menu_status() -> (bool, bool) {
     (true, current)
 }
 
+/// Makes Explorer reload icons (also used after a folder icon changes:
+/// Explorer ignores per-item updates for `desktop.ini` icons).
 #[cfg(windows)]
-fn notify_assoc_changed() {
+pub fn notify_assoc_changed() {
     use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None) };
 }
@@ -160,6 +162,9 @@ pub fn windows_build() -> u32 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
 }
+
+#[cfg(not(windows))]
+pub fn notify_assoc_changed() {}
 
 #[cfg(not(windows))]
 pub fn register_context_menu() -> Result<()> {

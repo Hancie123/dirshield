@@ -11,14 +11,14 @@
 //! ```
 //! Changing the master password only re-wraps MK; no vault is re-encrypted.
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::crypto::{self, b64, Key32, KdfParams, Sealed};
+use crate::crypto::{self, b64, KdfParams, Key32, Sealed};
 use crate::db::{now_ms, Db};
 use crate::error::{Error, Result};
 
@@ -55,6 +55,46 @@ pub fn validate_new_password(pw: &str) -> Result<()> {
     Ok(())
 }
 
+/// Minimum zxcvbn score (0–4) for the master password. 3 = "safely
+/// unguessable": strong protection against an offline attack on Argon2id.
+pub const MIN_MASTER_SCORE: u8 = 3;
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordStrength {
+    /// 0 (too guessable) ... 4 (very unguessable)
+    pub score: u8,
+    pub warning: Option<String>,
+    pub suggestions: Vec<String>,
+}
+
+/// zxcvbn estimate of how guessable `pw` is (dictionary words, names,
+/// keyboard patterns, dates, repeats, l33t substitutions...).
+pub fn password_strength(pw: &str) -> PasswordStrength {
+    if pw.is_empty() || pw.len() > 1024 {
+        return PasswordStrength { score: 0, warning: None, suggestions: vec![] };
+    }
+    let e = zxcvbn::zxcvbn(pw, &["dirshield", "dir shield", "folder", "lock"]);
+    let (warning, suggestions) = match e.feedback() {
+        Some(f) => (f.warning().map(|w| w.to_string()), f.suggestions().iter().map(|s| s.to_string()).collect()),
+        None => (None, vec![]),
+    };
+    PasswordStrength { score: e.score().into(), warning, suggestions }
+}
+
+/// Rules for a new master password: the length rules plus a zxcvbn check.
+/// The master password is the only thing between an offline attacker holding
+/// the database and every vault key, so "eight characters" is not enough.
+pub fn validate_master_password(pw: &str) -> Result<()> {
+    validate_new_password(pw)?;
+    let s = password_strength(pw);
+    if s.score < MIN_MASTER_SCORE {
+        let why = s.warning.map(|w| format!(" {w}")).unwrap_or_default();
+        return Err(Error::Invalid(format!("This master password is too easy to guess.{why} Try a longer passphrase of several unrelated words.")));
+    }
+    Ok(())
+}
+
 pub fn load_metadata(db: &Db) -> Result<Option<MasterKeyMetadata>> {
     let raw: Option<String> = db.lock().query_row("SELECT master_key_metadata FROM users WHERE id=1", [], |r| r.get(0)).optional()?;
     match raw {
@@ -83,7 +123,7 @@ pub fn setup(db: &Db, password: &str, kdf: KdfParams) -> Result<(Key32, Zeroizin
     if load_metadata(db)?.is_some() {
         return Err(Error::AlreadyInitialized);
     }
-    validate_new_password(password)?;
+    validate_master_password(password)?;
     let mk = crypto::random_key();
     let recovery = crypto::random_key();
     let recovery_salt = crypto::random_bytes::<16>().to_vec();
@@ -119,7 +159,7 @@ pub fn recovery_secret(meta: &MasterKeyMetadata, recovery_text: &str) -> Result<
 
 /// Re-wraps the master key under a new password. Vaults are untouched.
 pub fn rewrap_master(db: &Db, mk: &[u8; 32], new_password: &str, kdf: KdfParams) -> Result<()> {
-    validate_new_password(new_password)?;
+    validate_master_password(new_password)?;
     let mut meta = load_metadata(db)?.ok_or(Error::NotInitialized)?;
     let kek = crypto::derive_password_key(new_password, &kdf)?;
     meta.mk_by_password = crypto::seal(&kek, mk, AAD_MK_PW);
@@ -169,7 +209,15 @@ impl RateLimiter {
     }
 
     /// Runs `f` (which performs a password check) under the rate limiter.
+    ///
+    /// The check, the verification and the bookkeeping run under one global
+    /// gate, so parallel attempts are serialised: each sees the failures
+    /// recorded by the ones before it and cannot slip past the limit while
+    /// another attempt is still inside Argon2. `f` must not call `guarded`
+    /// itself (the gate is not re-entrant).
     pub fn guarded<T>(db: &Db, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        static GATE: Mutex<()> = Mutex::new(());
+        let _gate = GATE.lock();
         Self::check(db)?;
         match f() {
             Ok(v) => {
@@ -207,37 +255,50 @@ impl Default for Session {
 
 impl Session {
     pub fn unlock(&self, mk: Key32) {
-        let mut s = self.inner.lock().unwrap();
+        let mut s = self.inner.lock();
         s.master = Some(mk);
         s.last_activity = Instant::now();
     }
 
     pub fn lock(&self) {
-        self.inner.lock().unwrap().master = None; // Zeroizing wipes the key on drop
+        self.inner.lock().master = None; // Zeroizing wipes the key on drop
     }
 
     pub fn is_unlocked(&self) -> bool {
-        self.inner.lock().unwrap().master.is_some()
+        self.inner.lock().master.is_some()
     }
 
     pub fn touch(&self) {
-        self.inner.lock().unwrap().last_activity = Instant::now();
+        self.inner.lock().last_activity = Instant::now();
     }
 
     pub fn set_timeout(&self, d: Duration) {
-        self.inner.lock().unwrap().timeout = d;
+        self.inner.lock().timeout = d;
     }
 
     /// Copy of the master key for the duration of one command.
+    ///
+    /// Does NOT count as user activity: background refreshes (polling,
+    /// event-driven reloads) call this constantly and must not keep an
+    /// unattended session alive. Use [`Session::master_active`] for commands
+    /// the user explicitly started.
     pub fn master(&self) -> Result<Key32> {
-        let mut s = self.inner.lock().unwrap();
-        s.last_activity = Instant::now();
+        let s = self.inner.lock();
         s.master.as_ref().map(|k| Zeroizing::new(**k)).ok_or(Error::SessionLocked)
+    }
+
+    /// Like [`Session::master`], but also resets the idle timer. For
+    /// user-initiated actions only.
+    pub fn master_active(&self) -> Result<Key32> {
+        let mut s = self.inner.lock();
+        let k = s.master.as_ref().map(|k| Zeroizing::new(**k)).ok_or(Error::SessionLocked)?;
+        s.last_activity = Instant::now();
+        Ok(k)
     }
 
     /// Returns true if the session was auto-locked by this call.
     pub fn expire_if_idle(&self) -> bool {
-        let mut s = self.inner.lock().unwrap();
+        let mut s = self.inner.lock();
         if s.master.is_some() && !s.timeout.is_zero() && s.last_activity.elapsed() > s.timeout {
             s.master = None;
             return true;
@@ -259,16 +320,16 @@ mod tests {
     #[test]
     fn setup_login_change_recover() {
         let (_d, db) = db();
-        let (mk, rec) = setup(&db, "first-password", KdfParams::new_test()).unwrap();
-        assert!(matches!(setup(&db, "another-pass", KdfParams::new_test()), Err(Error::AlreadyInitialized)));
+        let (mk, rec) = setup(&db, "amber quartz tundra bicycle", KdfParams::new_test()).unwrap();
+        assert!(matches!(setup(&db, "lunar copper meadow fiddle", KdfParams::new_test()), Err(Error::AlreadyInitialized)));
         let meta = load_metadata(&db).unwrap().unwrap();
-        assert_eq!(*unwrap_master(&meta, "first-password").unwrap(), *mk);
+        assert_eq!(*unwrap_master(&meta, "amber quartz tundra bicycle").unwrap(), *mk);
         assert!(matches!(unwrap_master(&meta, "wrong-password"), Err(Error::AuthFailed)));
         // change password: same MK, old password no longer works
-        rewrap_master(&db, &mk, "second-password", KdfParams::new_test()).unwrap();
+        rewrap_master(&db, &mk, "velvet harbor crimson oyster", KdfParams::new_test()).unwrap();
         let meta = load_metadata(&db).unwrap().unwrap();
-        assert!(unwrap_master(&meta, "first-password").is_err());
-        assert_eq!(*unwrap_master(&meta, "second-password").unwrap(), *mk);
+        assert!(unwrap_master(&meta, "amber quartz tundra bicycle").is_err());
+        assert_eq!(*unwrap_master(&meta, "velvet harbor crimson oyster").unwrap(), *mk);
         // recovery key still yields the same MK
         assert_eq!(*unwrap_master_with_recovery(&meta, &rec).unwrap(), *mk);
         // a different (valid-looking) recovery key fails
@@ -276,7 +337,7 @@ mod tests {
         assert!(unwrap_master_with_recovery(&meta, &other).is_err());
         // nothing secret in the DB in plaintext
         let raw: String = db.lock().query_row("SELECT master_key_metadata FROM users", [], |r| r.get(0)).unwrap();
-        assert!(!raw.contains("second-password"));
+        assert!(!raw.contains("velvet harbor crimson oyster"));
         assert!(!raw.contains(&hex::encode(*mk)));
     }
 
@@ -284,6 +345,16 @@ mod tests {
     fn short_passwords_rejected() {
         let (_d, db) = db();
         assert!(setup(&db, "short", KdfParams::new_test()).is_err());
+    }
+
+    #[test]
+    fn weak_master_passwords_rejected() {
+        let (_d, db) = db();
+        for weak in ["password123", "qwertyuiop", "dirshield2026", "aaaaaaaaaaaa", "P@ssw0rd!"] {
+            assert!(matches!(setup(&db, weak, KdfParams::new_test()), Err(Error::Invalid(_))), "{weak} accepted");
+        }
+        assert!(password_strength("amber quartz tundra bicycle").score >= MIN_MASTER_SCORE);
+        assert_eq!(password_strength("").score, 0);
     }
 
     #[test]
@@ -304,5 +375,47 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         assert!(s.expire_if_idle());
         assert!(matches!(s.master(), Err(Error::SessionLocked)));
+    }
+
+    #[test]
+    fn background_reads_do_not_reset_idle_timer() {
+        let s = Session::default();
+        s.unlock(crypto::random_key());
+        s.set_timeout(Duration::from_millis(20));
+        for _ in 0..6 {
+            std::thread::sleep(Duration::from_millis(5));
+            s.master().unwrap();
+        }
+        assert!(s.expire_if_idle());
+    }
+
+    #[test]
+    fn user_actions_reset_idle_timer() {
+        let s = Session::default();
+        s.unlock(crypto::random_key());
+        s.set_timeout(Duration::from_millis(50));
+        for _ in 0..6 {
+            std::thread::sleep(Duration::from_millis(15));
+            s.master_active().unwrap();
+        }
+        assert!(!s.expire_if_idle());
+    }
+
+    #[test]
+    fn parallel_attempts_cannot_bypass_rate_limit() {
+        let (_d, db) = db();
+        let passed = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            for _ in 0..(FREE_ATTEMPTS * 4) {
+                sc.spawn(|| {
+                    let _ = RateLimiter::guarded::<()>(&db, || {
+                        passed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(20)); // stand-in for Argon2
+                        Err(Error::AuthFailed)
+                    });
+                });
+            }
+        });
+        assert_eq!(passed.load(std::sync::atomic::Ordering::SeqCst), FREE_ATTEMPTS as usize);
     }
 }
