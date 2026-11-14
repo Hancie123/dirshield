@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Release DirShield: set the version everywhere, commit, and push.
-// GitHub Actions then builds the Windows and Linux installers and publishes
-// the GitHub Release "DirShield v<version>" (see .github/workflows/build.yml).
+// Release DirShield: set the version everywhere, commit, tag v<version>, and
+// push. Only the tag push triggers CI: GitHub Actions then builds the Windows
+// and Linux installers and publishes the GitHub Release "DirShield v<version>" (see .github/workflows/build.yml).
 //
 // Usage:
 //   yarn release patch          1.0.0 -> 1.0.1
@@ -83,7 +83,7 @@ if (dirty) {
   console.log(dirty.split("\n").map((l) => `  ${l}`).join("\n"));
 }
 if (dryRun) {
-  console.log(`\n(dry run) Would set ${next} in tauri.conf.json, package.json, Cargo.toml, Cargo.lock, commit "Release ${tag}" and push.`);
+  console.log(`\n(dry run) Would set ${next} in tauri.conf.json, package.json, Cargo.toml, Cargo.lock, commit "Release ${tag}", tag ${tag} and push both.`);
   process.exit(0);
 }
 const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -102,12 +102,14 @@ replaceOnce(files.pkg, /("version"\s*:\s*")[^"]+(")/, `$1${next}$2`, "package.js
 replaceOnce(files.cargo, /^(version\s*=\s*")[^"]+(")/m, `$1${next}$2`, "Cargo.toml");
 replaceOnce(files.lock, /(name = "dirshield"\r?\nversion = ")[^"]+(")/, `$1${next}$2`, "Cargo.lock");
 
-// --- commit and push -------------------------------------------------------
+// --- commit, tag and push ---------------------------------------------------
 git("add", "-A");
 // --allow-empty: releasing the current version with nothing else changed
-// still needs a push to start the build.
+// still needs a commit to tag.
 git("commit", "--allow-empty", "-m", `Release ${tag}`);
-execFileSync("git", ["push", "origin", "master"], { cwd: root, stdio: "inherit" });
+git("tag", "-a", tag, "-m", `DirShield ${tag}`);
+// The tag push is what starts the GitHub build; --atomic pushes both or neither.
+execFileSync("git", ["push", "--atomic", "origin", "master", tag], { cwd: root, stdio: "inherit" });
 
 const remote = tryGit("remote", "get-url", "origin") ?? "";
 const repo = remote.replace(/\.git$/, "").replace(/^git@github\.com:/, "https://github.com/");

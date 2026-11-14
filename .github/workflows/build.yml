@@ -1,11 +1,11 @@
 name: Build
 
-# Version-based builds: the version in src-tauri/tauri.conf.json drives
-# everything. Every push builds and uploads installers named with that
-# version. A push to master with a NEW version (no tag v<version> yet) also
-# creates the tag and a GitHub Release with the installers attached.
-# To release: bump "version" in tauri.conf.json, package.json and
-# src-tauri/Cargo.toml, then push.
+# Builds run ONLY for releases: `yarn release 1.2` (scripts/release.mjs) sets
+# the version, commits, creates the tag v1.2.0 and pushes it. That tag push
+# starts this workflow, which builds the installers and publishes the GitHub
+# Release. Ordinary commits/pushes do not build anything.
+# You can also start a build by hand from the Actions tab (workflow_dispatch);
+# that only builds and uploads installers, it never creates a release.
 #
 # Secrets (repository settings -> Secrets and variables -> Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of the updater private key
@@ -15,8 +15,7 @@ name: Build
 
 on:
   push:
-    branches: [master]
-  pull_request:
+    tags: ["v*"]
   workflow_dispatch:
 
 # Read-only by default; only the release job gets write access.
@@ -25,8 +24,8 @@ permissions:
 
 concurrency:
   group: build-${{ github.ref }}
-  # A master push may be creating a release: let it finish.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  # A tag push is creating a release: let it finish.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   version:
@@ -38,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - id: v
         name: Read and check version
@@ -52,12 +51,16 @@ jobs:
             exit 1
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/master" ] && ! git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if [ "$GITHUB_REF_NAME" != "v$V" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match the version in the files (v$V)."
+              exit 1
+            fi
             echo "release=true" >> "$GITHUB_OUTPUT"
-            echo "New version v$V: a release will be created."
+            echo "Tag v$V: a release will be created."
           else
             echo "release=false" >> "$GITHUB_OUTPUT"
-            echo "v$V already released (or not a push to master): build only."
+            echo "Manual run: build only, no release."
           fi
 
   lint:
@@ -212,7 +215,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
-          target_commitish: ${{ github.sha }}
           name: DirShield v${{ needs.version.outputs.version }}
           generate_release_notes: true
           fail_on_unmatched_files: true
