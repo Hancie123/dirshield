@@ -179,23 +179,40 @@ yarn typecheck      # Type-check the frontend
 
 ```text
 dirshield/
-├── src/                     # React + TypeScript frontend
-│   ├── components/fluent/   # Fluent UI component library
-│   ├── dialogs/             # Lock / unlock / vault dialogs
-│   ├── pages/               # Home, Folders, Operations, Settings, Auth
-│   └── lib/                 # Tauri API bindings, state store, formatting
-└── src-tauri/               # Rust backend (Tauri 2)
+├── src/                         # React + TypeScript frontend (imports use the @/ alias)
+│   ├── main.tsx                 # Entry: main window or Explorer password prompt
+│   ├── app/                     # App shell (layout, navigation) and global store
+│   ├── api/                     # Typed client for the Rust commands: types, errors, client
+│   ├── components/
+│   │   ├── fluent/              # Fluent UI component library (buttons, dialogs, tables…)
+│   │   └── *.tsx                # Shared app components (credentials, progress, strength meter)
+│   ├── features/                # One folder per feature: its pages, dialogs and helpers
+│   │   ├── auth/                # First-run setup and sign-in
+│   │   ├── home/                # Dashboard
+│   │   ├── folders/             # Protected folders list, context menu, lock/unlock dialogs
+│   │   ├── operations/          # Running and finished operations
+│   │   ├── recovery/            # Recovery key, backups, orphaned Quick Lock folders
+│   │   ├── activity/            # Activity log
+│   │   ├── settings/            # Settings and master password change
+│   │   ├── about/               # About and updates
+│   │   ├── updates/             # Auto-updater
+│   │   └── prompt/              # Small password window opened from Explorer
+│   ├── lib/                     # Framework-free helpers (formatting, native pickers)
+│   └── styles/                  # Global stylesheet (Tailwind + Fluent tokens)
+└── src-tauri/                   # Rust backend (Tauri 2)
     ├── src/
-    │   ├── auth.rs          # Master password, recovery key, sessions, rate limiting
-    │   ├── crypto.rs        # Cryptographic building blocks
-    │   ├── quicklock.rs     # Quick Lock implementation
-    │   ├── vault/           # Secure Lock: header, manifest, streaming, journaled engine
-    │   ├── winsec.rs        # NTFS ACL handling
-    │   ├── shell.rs         # Explorer context menu and startup registration
-    │   ├── search.rs        # Windows Search exclusion
-    │   └── commands.rs      # Tauri command surface
-    ├── tests/               # Integration tests (vault engine, Quick Lock)
-    └── windows/hooks.nsh    # Installer hooks
+    │   ├── lib.rs               # Entry point and module map
+    │   ├── app/                 # State, windows, tray, background operations, uninstall
+    │   ├── commands/            # Tauri command surface, one file per area
+    │   ├── domain/              # Error type and typed values shared across layers
+    │   ├── security/            # Crypto, master key, password rules, session, rate limit, Hello
+    │   ├── storage/             # SQLite database and encrypted backups
+    │   ├── vault/               # Secure Lock: header, manifest, streaming, scan, browse
+    │   │   └── engine/          # Journaled engine: encrypt, relock, restore, verify, cleanup
+    │   ├── quicklock/           # Quick Lock, NTFS ACL (acl.rs), locked-folder icon
+    │   └── platform/            # Windows integration: fs, Explorer menu, Search, session events
+    ├── tests/                   # Integration tests (vault engine, Quick Lock)
+    └── windows/hooks.nsh        # Installer hooks
 ```
 
 ## Roadmap

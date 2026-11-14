@@ -8,9 +8,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use dirshield_lib::crypto::{self, KdfParams};
-use dirshield_lib::db::Db;
-use dirshield_lib::error::Error;
+use dirshield_lib::domain::error::Error;
+use dirshield_lib::security::crypto::{self, KdfParams};
+use dirshield_lib::storage::db::Db;
 use dirshield_lib::vault::engine::{self, Control, DecryptJob, DecryptParams, EncryptJob, NewVaultSpec};
 use dirshield_lib::vault::header::{self, VaultHeader, MANIFEST_FILE, OBJECTS_DIR};
 

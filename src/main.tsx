@@ -1,11 +1,11 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import "./styles.css";
-import App from "./App";
-import { NotificationHost } from "./components/fluent";
-import { StoreProvider } from "./lib/store";
-import { PromptApp } from "./prompt/PromptApp";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import App from "@/app/App";
+import { StoreProvider } from "@/app/store";
+import { NotificationHost } from "@/components/fluent";
+import { PromptApp } from "@/features/prompt/PromptApp";
+import "@/styles/globals.css";
 
 // Desktop app: suppress the browser context menu except in text fields.
 document.addEventListener("contextmenu", (e) => {

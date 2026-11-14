@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::stream::{decrypt_blob, BlobKind};
-use crate::error::{Error, Result};
+use crate::domain::error::{Error, Result};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "t")]
@@ -60,7 +60,7 @@ pub fn read_manifest<R: std::io::Read>(r: R, vk: &[u8; 32], vault_id: &[u8; 16],
             Line::File { p, s, .. } => {
                 safe_rel_path(p)?;
                 files += 1;
-                bytes += s;
+                bytes = bytes.checked_add(*s).ok_or_else(|| Error::Integrity("manifest sizes overflow".into()))?;
             }
             Line::End { dirs: d, files: fl, bytes: b } => end = Some((*d, *fl, *b)),
         }
@@ -107,6 +107,31 @@ pub fn safe_rel_path(p: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// Why Windows cannot create a manifest path as-is, or `None` if it can.
+/// `safe_rel_path` deliberately allows these names (a vault made elsewhere may
+/// contain them and should stay browsable); restoring on Windows must not.
+/// Covers reserved device names (CON, NUL, aux.txt, COM1…) and components
+/// ending in a dot or space, which Windows silently strips.
+pub fn windows_name_problem(p: &str) -> Option<String> {
+    const RESERVED: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
+    for part in p.split('/') {
+        if part.ends_with('.') || part.ends_with(' ') {
+            return Some(format!("“{part}” ends with a dot or space"));
+        }
+        let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ').to_ascii_uppercase();
+        let numbered = |prefix: &str| {
+            stem.strip_prefix(prefix).is_some_and(|n| {
+                let mut c = n.chars();
+                matches!((c.next(), c.next()), (Some('1'..='9' | '¹' | '²' | '³'), None))
+            })
+        };
+        if RESERVED.contains(&stem.as_str()) || numbered("COM") || numbered("LPT") {
+            return Some(format!("“{part}” is a reserved name on Windows"));
+        }
+    }
+    None
+}
+
 /// Relative path of `full` below `root`, with `/` separators.
 pub fn rel_string(root: &Path, full: &Path) -> Result<String> {
     let rel = full.strip_prefix(root).map_err(|_| Error::Invalid("path outside of folder".into()))?;
@@ -130,5 +155,15 @@ mod tests {
             assert!(safe_rel_path(p).is_err(), "{p}");
         }
         assert!(safe_rel_path("Ünïcode/名前/file (1).txt").is_ok());
+    }
+
+    #[test]
+    fn flags_windows_unfriendly_names() {
+        for p in ["CON", "nul", "a/aux.txt", "Com1", "lpt9.log", "x/CONOUT$", "nul .txt", "dir./f", "f ", "a/b."] {
+            assert!(windows_name_problem(p).is_some(), "{p}");
+        }
+        for p in ["console", "a/null.txt", "COM", "COM10", "LPT0", "auxiliary/x", "a.b/c", ".hidden", "Ünïcode/名前/file (1).txt"] {
+            assert!(windows_name_problem(p).is_none(), "{p}");
+        }
     }
 }

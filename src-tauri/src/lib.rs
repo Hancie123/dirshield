@@ -1,164 +1,43 @@
 //! DirShield – Windows folder locker.
 //!
 //! Module map:
-//! * `crypto`    – primitives composition (AES-GCM, Argon2id, HKDF, X25519 escrow)
-//! * `auth`      – master password / recovery key / session / rate limiting
-//! * `vault`     – Secure Lock format + journaled engine
-//! * `quicklock` – Quick Lock (move + attributes + ACL), `winsec` ACL code
-//! * `search`    – Windows Search privacy measures
-//! * `shell`     – Explorer context menu, autostart, accent colour
-//! * `ops`       – background operation manager
-//! * `commands`  – Tauri command surface
+//! * `app`       – application shell: state, windows, tray, background operations
+//! * `commands`  – Tauri command surface (the only API the frontend can call)
+//! * `domain`    – error type and the typed values shared across layers
+//! * `security`  – cryptography, master password, session, rate limiting, Windows Hello
+//! * `storage`   – SQLite database and encrypted backups
+//! * `vault`     – Secure Lock: on-disk format and the journaled engine
+//! * `quicklock` – Quick Lock: move, attributes, NTFS access restriction
+//! * `platform`  – Windows integration: file system, Explorer menu, Search, session events
 
 // Command/worker entry points pass many owned values into background threads;
 // grouping them into ad-hoc structs would not make the code clearer.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 pub mod app;
-pub mod auth;
 pub mod commands;
-pub mod crypto;
-pub mod db;
-pub mod error;
-pub mod foldericon;
-pub mod fsutil;
-pub mod hello;
-pub mod model;
-pub mod ops;
+pub mod domain;
+pub mod platform;
 pub mod quicklock;
-pub mod search;
-pub mod shell;
+pub mod security;
+pub mod storage;
 pub mod vault;
-pub mod winsec;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// `--confirm-uninstall`: started by the uninstaller. Only the password
-/// window is shown; the exit code tells the uninstaller whether to go on
-/// (0 = master password confirmed, 1 = cancelled).
-pub static UNINSTALL_MODE: AtomicBool = AtomicBool::new(false);
-pub static UNINSTALL_CONFIRMED: AtomicBool = AtomicBool::new(false);
-pub const CONFIRM_UNINSTALL_ARG: &str = "--confirm-uninstall";
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
-pub fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
-}
-
-/// The main window is small while signed out (fitted to the sign-in card;
-/// `compact` is the size the page asks for) and full size once signed in.
-pub fn apply_window_mode(w: &WebviewWindow, full: bool, compact: Option<(f64, f64)>) {
-    use tauri::LogicalSize;
-    if full {
-        let _ = w.set_resizable(true);
-        // The maximize button stays disabled in every mode.
-        let _ = w.set_maximizable(false);
-        let _ = w.set_min_size(Some(LogicalSize::new(760.0, 540.0)));
-        let _ = w.set_size(LogicalSize::new(1120.0, 740.0));
-    } else {
-        let _ = w.unmaximize();
-        let _ = w.set_min_size(None::<LogicalSize<f64>>);
-        let (cw, ch) = compact.unwrap_or((480.0, 420.0));
-        let _ = w.set_size(LogicalSize::new(cw.clamp(360.0, 720.0), ch.clamp(300.0, 760.0)));
-        let _ = w.set_resizable(false);
-        let _ = w.set_maximizable(false);
-    }
-    let _ = w.center();
-}
-
-/// Mica backdrop (Windows 11 build 22000+; Windows 10 gets an opaque
-/// surface) and the saved theme, for any DirShield window.
-fn style_window(window: &WebviewWindow, st: &app::AppState) {
-    #[cfg(windows)]
-    if shell::windows_build() >= 22000 {
-        use tauri::window::{Effect, EffectsBuilder};
-        if window.set_effects(EffectsBuilder::new().effect(Effect::Mica).build()).is_ok() {
-            st.mica.store(true, Ordering::Relaxed);
-        }
-    }
-    let theme = st.db.get_setting("theme").ok().flatten().unwrap_or_default();
-    let _ = window.set_theme(match theme.as_str() {
-        "light" => Some(tauri::Theme::Light),
-        "dark" => Some(tauri::Theme::Dark),
-        _ => None,
-    });
-}
-
-/// Explorer actions answered by the small password window instead of the app.
-///
-/// Every menu entry asks for its password in that same small window. Actions
-/// the window can't finish itself (Secure Lock, Settings, unlocking a Secure
-/// Lock folder) sign DirShield in there and then continue in the main window;
-/// if DirShield is already signed in they go straight to the main window.
-fn is_prompt_action(st: &app::AppState, a: &shell::ShellAction) -> bool {
-    if auth::load_metadata(&st.db).ok().flatten().is_none() {
-        return false; // first run: the main window shows setup
-    }
-    let signed_in = st.session.is_unlocked();
-    match (a.action.as_str(), a.path.as_deref()) {
-        // Quick Lock always confirms with a password, even when signed in.
-        ("lock" | "quick-lock", Some(_)) => true,
-        ("unlock" | "unhide", Some(p)) => !signed_in || commands::has_quick_record(st, p),
-        ("secure-lock", Some(_)) | ("settings", _) => !signed_in,
-        _ => false,
-    }
-}
-
-/// Opens (or re-targets) the small password window for an Explorer action.
-fn open_prompt(app: &AppHandle, action: shell::ShellAction) {
-    let st = app.state::<app::AppState>();
-    *st.prompt.lock() = Some(action);
-    if let Some(w) = app.get_webview_window("prompt") {
-        let _ = app.emit_to("prompt", "prompt-action", ());
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
-        return;
-    }
-    let built = WebviewWindowBuilder::new(app, "prompt", WebviewUrl::App("index.html".into()))
-        .title("DirShield")
-        .inner_size(440.0, 350.0)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .center()
-        .always_on_top(true)
-        .transparent(true)
-        .focused(true)
-        .build();
-    match built {
-        Ok(w) => style_window(&w, &st),
-        Err(_) if UNINSTALL_MODE.load(Ordering::Relaxed) => std::process::exit(1),
-        Err(_) => {
-            // Fall back to the full app.
-            let a = st.prompt.lock().take();
-            *st.pending.lock() = a;
-            show_main(app);
-        }
-    }
-}
-
-/// Routes an Explorer action to the prompt window or the main window.
-fn route_action(app: &AppHandle, action: shell::ShellAction) {
-    let st = app.state::<app::AppState>();
-    if is_prompt_action(&st, &action) {
-        open_prompt(app, action);
-    } else {
-        let _ = app.emit_to("main", "shell-action", &action);
-        show_main(app);
-    }
-}
+use app::uninstall::{CONFIRM_UNINSTALL_ARG, UNINSTALL_CONFIRMED, UNINSTALL_MODE};
+use app::windows::{is_prompt_action, open_prompt, route_action, show_main, style_window};
+use app::AppState;
+use platform::{session_events, shell};
+use security::auth;
 
 pub fn run() {
     let uninstall = std::env::args().any(|a| a == CONFIRM_UNINSTALL_ARG);
     UNINSTALL_MODE.store(uninstall, Ordering::Relaxed);
-    let state = match app::AppState::new() {
+    let state = match AppState::new() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("DirShield failed to start: {e}");
@@ -189,9 +68,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .setup(move |app| {
-            let st = app.state::<app::AppState>();
+            let st = app.state::<AppState>();
             let window = app.get_webview_window("main").expect("main window");
             style_window(&window, &st);
 
@@ -217,17 +97,33 @@ pub fn run() {
             }
 
             st.ops.start_ticker(app.handle().clone(), st.db.clone());
+            let _ = app::tray::build(app);
+
+            // Sign out when Windows locks, signs out or goes to sleep.
+            let handle = app.handle().clone();
+            session_events::watch(move |event| commands::on_system_event(&handle, event));
 
             // Auto-lock after inactivity. Running operations keep their own key
             // copies so they continue, but the UI requires sign-in again.
+            // Work sessions are not ended here: being idle in DirShield says
+            // nothing about whether the restored folder is still in use.
+            // Once a minute, the background task (log seal, deferred header
+            // updates, scheduled integrity checks).
             let handle = app.handle().clone();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(5));
-                let st = handle.state::<app::AppState>();
-                if st.session.expire_if_idle() {
-                    st.close_all_browsers();
-                    st.db.log("auto_lock", None, "info", None);
-                    let _ = handle.emit("session-locked", ());
+            std::thread::spawn(move || {
+                let mut ticks: u32 = 0;
+                loop {
+                    std::thread::sleep(Duration::from_secs(5));
+                    let st = handle.state::<AppState>();
+                    if st.session.expire_if_idle() {
+                        st.close_all_browsers();
+                        st.db.log("auto_lock", None, "info", None);
+                        let _ = handle.emit("session-locked", ());
+                    }
+                    ticks += 1;
+                    if ticks % 12 == 1 {
+                        commands::background_tick(&handle);
+                    }
                 }
             });
             Ok(())
@@ -236,7 +132,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "prompt" && matches!(event, WindowEvent::Destroyed) {
                 let app = window.app_handle();
-                app.state::<app::AppState>().prompt.lock().take();
+                app.state::<AppState>().prompt.lock().take();
                 if UNINSTALL_MODE.load(Ordering::Relaxed) {
                     std::process::exit(if UNINSTALL_CONFIRMED.load(Ordering::Relaxed) { 0 } else { 1 });
                 }
@@ -258,6 +154,16 @@ pub fn run() {
             commands::password_strength,
             commands::change_master_password,
             commands::reset_master_password,
+            commands::recovery_rotate_begin,
+            commands::recovery_rotate_commit,
+            commands::recovery_rotate_cancel,
+            commands::set_portable_vaults,
+            commands::backup_create,
+            commands::backup_restore,
+            commands::work_session_end,
+            commands::work_session_keep,
+            commands::lock_all_folders,
+            commands::verify_activity_log,
             commands::scan_folder,
             commands::free_space,
             commands::list_vaults,
@@ -305,7 +211,7 @@ pub fn run() {
         .run(|app, event| {
             // Files opened from a vault don't outlive DirShield.
             if let tauri::RunEvent::Exit = event {
-                app.state::<app::AppState>().close_all_browsers();
+                app.state::<AppState>().close_all_browsers();
             }
         });
 }

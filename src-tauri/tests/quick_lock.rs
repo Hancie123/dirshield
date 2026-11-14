@@ -4,7 +4,8 @@
 
 use std::fs;
 
-use dirshield_lib::{fsutil, quicklock, winsec};
+use dirshield_lib::platform::fsutil;
+use dirshield_lib::quicklock::{self, acl};
 
 fn make(dir: &std::path::Path) {
     fs::create_dir_all(dir.join("sub")).unwrap();
@@ -32,12 +33,12 @@ fn visible_lock_stays_in_place_and_unhidden() {
     assert!(fs::read_dir(&folder).is_err());
     assert!(fs::read(&file).is_err());
     assert!(folder.exists());
-    assert!(winsec::is_restricted(&folder).unwrap());
+    assert!(acl::is_restricted(&folder).unwrap());
     let a = fsutil::get_attrs(&folder).unwrap();
     assert!(a & fsutil::FILE_ATTRIBUTE_HIDDEN == 0 && a & fsutil::FILE_ATTRIBUTE_SYSTEM == 0);
 
     quicklock::unlock(&st, &folder, None).unwrap();
-    assert!(!winsec::is_restricted(&folder).unwrap());
+    assert!(!acl::is_restricted(&folder).unwrap());
     assert_eq!(fsutil::get_attrs(&folder).unwrap() & fsutil::RESTORABLE_ATTRS, before);
     assert_eq!(fsutil::get_attrs(&file).unwrap(), file_before);
     assert!(fsutil::get_attrs(&kept).unwrap() & fsutil::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED != 0);
@@ -53,7 +54,7 @@ fn in_place_lock_denies_access_and_unlock_restores() {
 
     let st = quicklock::lock(&folder, None, "id1", true, None).unwrap();
     assert!(!st.moved);
-    assert!(winsec::is_restricted(&folder).unwrap());
+    assert!(acl::is_restricted(&folder).unwrap());
     let a = fsutil::get_attrs(&folder).unwrap();
     assert!(a & fsutil::FILE_ATTRIBUTE_HIDDEN != 0 && a & fsutil::FILE_ATTRIBUTE_SYSTEM != 0);
     assert!(fs::read(folder.join("sub").join("secret.txt")).is_err(), "full-path access must be denied");
@@ -67,7 +68,7 @@ fn in_place_lock_denies_access_and_unlock_restores() {
     assert!(fs::read(folder.join("sub").join("secret.txt")).is_err());
 
     quicklock::unlock(&st, &folder, None).unwrap();
-    assert!(!winsec::is_restricted(&folder).unwrap());
+    assert!(!acl::is_restricted(&folder).unwrap());
     assert_eq!(fs::read(folder.join("sub").join("secret.txt")).unwrap(), b"secret");
     assert_eq!(fsutil::get_attrs(&folder).unwrap() & fsutil::RESTORABLE_ATTRS, before);
 }
@@ -86,7 +87,7 @@ fn moved_lock_and_unlock_never_overwrites() {
     // Something new appeared at the original location: unlock must refuse, not merge/overwrite.
     fs::create_dir_all(&folder).unwrap();
     assert!(quicklock::unlock(&st, &folder, None).is_err());
-    assert!(winsec::is_restricted(&store.join("abc123")).unwrap(), "still locked after refused unlock");
+    assert!(acl::is_restricted(&store.join("abc123")).unwrap(), "still locked after refused unlock");
     fs::remove_dir(&folder).unwrap();
 
     let out = quicklock::unlock(&st, &folder, None).unwrap();

@@ -30,8 +30,8 @@ use std::io::{self, Read, Write};
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
-use crate::crypto::{hkdf32, random_bytes};
-use crate::error::{Error, Result};
+use crate::domain::error::{Error, Result};
+use crate::security::crypto::{hkdf32, random_bytes};
 
 pub const BLOB_MAGIC: &[u8; 4] = b"DSHB";
 pub const BLOB_VERSION: u8 = 1;
@@ -249,7 +249,7 @@ pub fn decrypt_blob<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::random_key;
+    use crate::security::crypto::random_key;
 
     fn roundtrip(len: usize, chunk: u32) {
         let vk = random_key();
@@ -281,7 +281,7 @@ mod tests {
         }
     }
 
-    fn sample() -> (crate::crypto::Key32, [u8; 16], Vec<u8>) {
+    fn sample() -> (crate::security::crypto::Key32, [u8; 16], Vec<u8>) {
         let vk = random_key();
         let vid = random_bytes::<16>();
         let (mut w, _) = BlobWriter::new(Vec::new(), &vk, &vid, BlobKind::File, 64).unwrap();

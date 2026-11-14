@@ -14,17 +14,18 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
 # Storage
-rusqlite = { version = "0.42", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled", "backup"] }
 
 # Cryptography (well-maintained RustCrypto / dalek crates - no hand-rolled primitives)
 aes-gcm = "0.10"
@@ -49,11 +50,15 @@ parking_lot = "0.12"
 winreg = "0.55"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
     "Win32_System_Search",
     "Win32_UI_Shell",
     "Win32_System_Threading",

@@ -19,8 +19,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{self, hkdf32, EscrowBox, KdfParams, Key32, Sealed};
-use crate::error::{Error, Result};
+use crate::domain::error::{Error, Result};
+use crate::security::crypto::{self, hkdf32, EscrowBox, KdfParams, Key32, Sealed};
 
 pub const HEADER_MAGIC: &[u8; 8] = b"DIRSHLD\0";
 pub const FORMAT_VERSION: u16 = 1;
@@ -46,6 +46,12 @@ pub enum KeyWrapper {
         #[serde(rename = "box")]
         escrow: EscrowBox,
     },
+    /// Copy of the master key as wrapped by the master password (the same
+    /// blob DirShield keeps in its database). Present only when "Open vaults
+    /// on another PC with the master password" is on, so a vault can be
+    /// imported with the master password alone. Refreshed whenever the
+    /// master password changes.
+    MasterPassword { kdf: KdfParams, sealed: Sealed },
 }
 
 impl KeyWrapper {
@@ -54,6 +60,7 @@ impl KeyWrapper {
             KeyWrapper::Master { .. } => "master",
             KeyWrapper::Password { .. } => "password",
             KeyWrapper::RecoveryEscrow { .. } => "recovery",
+            KeyWrapper::MasterPassword { .. } => "master_password",
         }
     }
 }
@@ -171,10 +178,32 @@ impl VaultHeader {
         for w in &self.wrappers {
             if let KeyWrapper::RecoveryEscrow { escrow, salt, .. } = w {
                 let secret = crypto::recovery_x25519_secret(recovery_key, salt);
-                return crypto::escrow_open_key(&secret, escrow, &wrapper_aad(&self.vault_id, "recovery"));
+                if let Ok(k) = crypto::escrow_open_key(&secret, escrow, &wrapper_aad(&self.vault_id, "recovery")) {
+                    return Ok(k);
+                }
             }
         }
         Err(Error::AuthFailed)
+    }
+
+    /// Master key from the portable copy in this header (see
+    /// [`KeyWrapper::MasterPassword`]), then the vault key from it.
+    pub fn unwrap_with_master_password(&self, password: &str) -> Result<Key32> {
+        for w in &self.wrappers {
+            if let KeyWrapper::MasterPassword { kdf, sealed } = w {
+                let mk = crate::security::auth::unwrap_master_parts(kdf, sealed, password)?;
+                return self.unwrap_with_master(&mk);
+            }
+        }
+        Err(Error::AuthFailed)
+    }
+
+    /// The recovery key id this vault's escrow was made for, if any.
+    pub fn recovery_id(&self) -> Option<&str> {
+        self.wrappers.iter().find_map(|w| match w {
+            KeyWrapper::RecoveryEscrow { recovery_id, .. } => Some(recovery_id.as_str()),
+            _ => None,
+        })
     }
 
     pub fn key_mode(&self) -> &'static str {
@@ -202,4 +231,51 @@ pub fn password_wrapper_with(vault_id: &str, password: &str, vk: &[u8; 32], kdf:
 
 pub fn recovery_wrapper(vault_id: &str, recovery_pub: &[u8; 32], recovery_id: &str, recovery_salt: &[u8], vk: &[u8; 32]) -> Result<KeyWrapper> {
     Ok(KeyWrapper::RecoveryEscrow { recovery_id: recovery_id.to_string(), salt: recovery_salt.to_vec(), escrow: crypto::escrow_seal(recovery_pub, vk, &wrapper_aad(vault_id, "recovery"))? })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security::auth;
+    use crate::storage::db::Db;
+
+    fn header(wrappers: Vec<KeyWrapper>, vk: &[u8; 32], id: &str) -> VaultHeader {
+        let mut h = VaultHeader { format_version: FORMAT_VERSION, algorithm: ALGORITHM.into(), vault_id: id.into(), chunk_size: 4096, created_utc: 0, wrappers, sealed: true, mac: String::new() };
+        h.compute_mac(vk).unwrap();
+        h
+    }
+
+    #[test]
+    fn portable_master_password_copy() {
+        let d = tempfile::tempdir().unwrap();
+        let db = Db::open(&d.path().join("t.db")).unwrap();
+        let (mk, _) = auth::setup(&db, "amber quartz tundra bicycle", KdfParams::new_test()).unwrap();
+        let meta = auth::load_metadata(&db).unwrap().unwrap();
+        let id = crypto::random_id();
+        let vk = crypto::random_key();
+        let h = header(vec![master_wrapper(&id, &mk, &vk), KeyWrapper::MasterPassword { kdf: meta.kdf.clone(), sealed: meta.mk_by_password.clone() }], &vk, &id);
+        // survives a round trip through the file format
+        h.write_atomic(d.path()).unwrap();
+        let h = VaultHeader::read(d.path()).unwrap();
+        h.verify_mac(&vk).unwrap();
+        assert_eq!(*h.unwrap_with_master_password("amber quartz tundra bicycle").unwrap(), *vk);
+        assert!(matches!(h.unwrap_with_master_password("wrong password!"), Err(Error::AuthFailed)));
+        // without the copy, the password alone is not enough
+        let plain = header(vec![master_wrapper(&id, &mk, &vk)], &vk, &id);
+        assert!(plain.unwrap_with_master_password("amber quartz tundra bicycle").is_err());
+    }
+
+    #[test]
+    fn any_recovery_escrow_opens() {
+        let id = crypto::random_id();
+        let vk = crypto::random_key();
+        let (a, b) = (crypto::random_bytes::<32>(), crypto::random_bytes::<32>());
+        let salt = crypto::random_bytes::<16>();
+        let w = |k: &[u8; 32]| recovery_wrapper(&id, &crypto::recovery_public(k, &salt), "r", &salt, &vk).unwrap();
+        let h = header(vec![w(&a), w(&b)], &vk, &id);
+        assert_eq!(*h.unwrap_with_recovery(&a).unwrap(), *vk);
+        assert_eq!(*h.unwrap_with_recovery(&b).unwrap(), *vk);
+        assert!(h.unwrap_with_recovery(&crypto::random_bytes::<32>()).is_err());
+        assert_eq!(h.recovery_id(), Some("r"));
+    }
 }

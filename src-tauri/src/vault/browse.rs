@@ -14,8 +14,8 @@ use super::engine::blob_path;
 use super::header::{VaultHeader, MANIFEST_FILE};
 use super::manifest::{read_manifest, Line};
 use super::stream::{blob_size, decrypt_blob, BlobKind};
-use crate::error::{Error, Result};
-use crate::fsutil;
+use crate::domain::error::{Error, Result};
+use crate::platform::fsutil;
 
 const ROOT: u32 = 0;
 
@@ -313,7 +313,7 @@ pub fn wipe_all(temp_root: &Path) {
 /// A fresh, private folder for one opened file.
 pub fn new_temp_dir(temp_root: &Path) -> Result<PathBuf> {
     fs::create_dir_all(temp_root)?;
-    let d = temp_root.join(crate::crypto::random_id());
+    let d = temp_root.join(crate::security::crypto::random_id());
     fs::create_dir(&d)?;
     Ok(d)
 }

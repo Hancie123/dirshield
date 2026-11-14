@@ -1,4 +1,4 @@
-import type { OpStatus, OpType, VaultStatus } from "./api";
+import { OpStatus, OpType, VaultStatus } from "@/api";
 
 export function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "—";
@@ -81,6 +81,8 @@ export const opTypeLabel: Record<OpType, string> = {
   decrypt: "Restore",
   verify: "Integrity check",
   cleanup: "Remove originals",
+  relock: "Lock again",
+  extract: "Extract files",
 };
 
 export const opStatusLabel: Record<OpStatus, string> = {
@@ -119,6 +121,20 @@ const actionLabels: Record<string, string> = {
   settings_changed: "Settings changed",
   recovered_after_restart: "Recovered after restart",
   recover_orphan: "Orphaned folder returned",
+  sign_out: "Signed out",
+  sign_in_windows_hello: "Signed in with Windows Hello",
+  work_session_start: "Work session started",
+  work_session_end: "Work session ended",
+  work_session_kept: "Kept unlocked (work session ended)",
+  lock_all: "Lock all",
+  relock: "Locked again",
+  extract: "Files extracted",
+  scheduled_verify: "Scheduled integrity check",
+  recovery_key_replaced: "New recovery key",
+  portable_vaults: "Open on another PC with master password",
+  backup_created: "Backup created",
+  backup_restored: "Restored from backup",
+  activity_cleared: "Activity history cleared",
 };
 export function actionLabel(a: string): string {
   return actionLabels[a] ?? a.replace(/_/g, " ");

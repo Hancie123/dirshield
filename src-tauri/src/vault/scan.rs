@@ -9,8 +9,8 @@ use serde::Serialize;
 use walkdir::WalkDir;
 
 use super::stream::{blob_size, DEFAULT_CHUNK};
-use crate::error::{Error, Result};
-use crate::fsutil;
+use crate::domain::error::{Error, Result};
+use crate::platform::fsutil;
 
 const SAMPLES: usize = 50;
 
