@@ -1,6 +1,7 @@
 //! Windows file-system helpers. Rust's std already handles long paths for its
 //! own APIs; for direct Win32 calls we build `\\?\` verbatim paths ourselves.
 
+#[cfg(windows)]
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};

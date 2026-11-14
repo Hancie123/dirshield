@@ -12,11 +12,14 @@ static HANDLER: OnceLock<Handler> = OnceLock::new();
 /// Starts watching. `on_event` receives "windows_locked", "windows_sign_out"
 /// or "sleep", on the watcher thread. Only the first call has any effect.
 pub fn watch(on_event: impl Fn(&'static str) + Send + Sync + 'static) {
-    if HANDLER.set(Box::new(on_event)).is_err() {
-        return;
-    }
+    let first = HANDLER.set(Box::new(on_event)).is_ok();
+    // Nothing to watch outside Windows; the handler is still recorded.
     #[cfg(windows)]
-    let _ = std::thread::Builder::new().name("session-events".into()).spawn(win::run);
+    if first {
+        let _ = std::thread::Builder::new().name("session-events".into()).spawn(win::run);
+    }
+    #[cfg(not(windows))]
+    let _ = first;
 }
 
 #[cfg(windows)]

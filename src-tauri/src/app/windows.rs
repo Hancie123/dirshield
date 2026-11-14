@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindo
 use super::uninstall::UNINSTALL_MODE;
 use super::AppState;
 use crate::commands;
-use crate::platform::shell::{self, ShellAction};
+use crate::platform::shell::ShellAction;
 use crate::security::auth;
 
 pub fn show_main(app: &AppHandle) {
@@ -44,7 +44,7 @@ pub fn apply_window_mode(w: &WebviewWindow, full: bool, compact: Option<(f64, f6
 /// surface) and the saved theme, for any DirShield window.
 pub fn style_window(window: &WebviewWindow, st: &AppState) {
     #[cfg(windows)]
-    if shell::windows_build() >= 22000 {
+    if crate::platform::shell::windows_build() >= 22000 {
         use tauri::window::{Effect, EffectsBuilder};
         if window.set_effects(EffectsBuilder::new().effect(Effect::Mica).build()).is_ok() {
             st.mica.store(true, Ordering::Relaxed);

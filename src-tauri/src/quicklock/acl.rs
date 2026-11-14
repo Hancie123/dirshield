@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use crate::domain::error::{Error, Result};
+use crate::domain::error::Result;
 
 /// RD | WD/AD | AD/AS | REA | WEA | X/TRAVERSE | DC | DELETE
 pub const DENY_MASK: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0020 | 0x0040 | 0x0001_0000;
@@ -23,6 +23,7 @@ pub const DENY_MASK: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0020 |
 #[cfg(windows)]
 mod imp {
     use super::*;
+    use crate::domain::error::Error;
     use crate::platform::fsutil::wide;
     use std::ffi::c_void;
     use windows::core::{PCWSTR, PWSTR};

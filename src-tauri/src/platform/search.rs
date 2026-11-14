@@ -17,6 +17,7 @@ use std::path::Path;
 
 use crate::platform::fsutil;
 
+#[cfg(windows)]
 fn scope_url(p: &Path) -> String {
     let mut s = fsutil::display_path(p);
     if !s.ends_with('\\') {

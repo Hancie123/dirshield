@@ -4,13 +4,14 @@
 
 # DirShield
 
-**Lock, hide and encrypt folders on Windows, with a native Windows 11 interface.**
+**Lock, hide and encrypt folders on Windows and Linux, with a native Windows 11 interface.**
 
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white)](#requirements)
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)](#requirements)
+[![Linux](https://img.shields.io/badge/Linux-experimental-FCC624?logo=linux&logoColor=black)](#linux-experimental)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB?logo=tauri&logoColor=white)](https://tauri.app)
-[![Rust](https://img.shields.io/badge/Rust-1.80%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.89%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)](https://github.com/Hancie123/dirshield/releases)
+[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)](https://github.com/Hancie123/dirshield/releases)
 
 [Features](#features) · [Security model](#security-model) · [Installation](#installation) · [Building from source](#building-from-source) · [Contributing](#contributing)
 
@@ -20,7 +21,7 @@
 
 ## Overview
 
-DirShield is a free, open-source folder locker for Windows 10 and 11. It has two protection modes:
+DirShield is a free, open-source folder locker for Windows 10 and 11, with experimental support for Linux (x64). It has two protection modes:
 
 - **Quick Lock** hides a folder and blocks access to it instantly, whatever its size.
 - **Secure Lock** encrypts a folder's contents, file names and directory structure with AES-256-GCM.
@@ -103,12 +104,32 @@ recovery key    ──X25519───▶ every vault key is also escrowed to the
 
 ### Requirements
 
+**Windows**
+
 - Windows 10 or Windows 11 (x64)
 - Microsoft Edge WebView2 runtime. Windows 11 ships with it, and the installer fetches it on Windows 10 if it is missing.
 
+**Linux** (experimental, see [Linux](#linux-experimental))
+
+- A 64-bit (x64) distribution with WebKitGTK 4.1, e.g. Ubuntu 22.04+, Debian 12+, Fedora 39+
+- The `.deb` works on Debian and Ubuntu; the `.AppImage` runs on most other distributions
+
 ### Download
 
-Download the latest installer from the [**Releases**](https://github.com/Hancie123/dirshield/releases) page and run it. DirShield installs per user and needs no administrator rights.
+Download the latest release from the [**Releases**](https://github.com/Hancie123/dirshield/releases) page.
+
+**Windows:** run `DirShield_<version>_x64-setup.exe`. DirShield installs per user and needs no administrator rights.
+
+**Linux:**
+
+```bash
+# Debian / Ubuntu
+sudo apt install ./DirShield_<version>_amd64.deb
+
+# Any distribution (AppImage, updates itself)
+chmod +x DirShield_<version>_amd64.AppImage
+./DirShield_<version>_amd64.AppImage
+```
 
 ### Verifying a download
 
@@ -120,6 +141,12 @@ Get-FileHash .\DirShield_<version>_x64-setup.exe -Algorithm SHA256
 
 # Provenance (GitHub CLI)
 gh attestation verify .\DirShield_<version>_x64-setup.exe --repo Hancie123/dirshield
+```
+
+```bash
+# Linux: checks every file you downloaded against SHA256SUMS.txt
+sha256sum --check --ignore-missing SHA256SUMS.txt
+gh attestation verify DirShield_<version>_amd64.AppImage --repo Hancie123/dirshield
 ```
 
 ### Updates
@@ -139,15 +166,14 @@ Releases also include `.deb` and `.AppImage` builds. They run the same code, but
 | File manager context menu, start at sign-in, Windows Search exclusion, Mica | ❌ Windows only |
 | Free-space check before encrypting | ❌ Skipped. Make sure the target drive has room. |
 
-On Linux, data lives in `$XDG_DATA_HOME/DirShield` (usually `~/.local/share/DirShield`).
-
 ### Where your data lives
 
 DirShield keeps its database, Secure Lock vaults and Quick-Locked folders in:
 
-```text
-%LOCALAPPDATA%\DirShield
-```
+| OS | Location |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\DirShield` |
+| Linux | `$XDG_DATA_HOME/DirShield` (usually `~/.local/share/DirShield`) |
 
 > [!WARNING]
 > **The uninstaller never deletes this folder**, so your protected data survives an uninstall. Reinstall DirShield to unlock it. Unlock your folders before you uninstall if you no longer need them protected.
@@ -159,18 +185,24 @@ DirShield keeps its database, Secure Lock vaults and Quick-Locked folders in:
 ### Prerequisites
 
 - [Node.js](https://nodejs.org) 20+ and [Yarn](https://yarnpkg.com)
-- [Rust](https://rustup.rs) 1.80+ (MSVC toolchain)
-- [Tauri 2 prerequisites for Windows](https://tauri.app/start/prerequisites/): Microsoft C++ Build Tools and WebView2
+- [Rust](https://rustup.rs) 1.89+
+- **Windows:** the MSVC toolchain and the [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/#windows) (Microsoft C++ Build Tools and WebView2)
+- **Linux:** the [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/#linux). On Debian / Ubuntu:
+
+  ```bash
+  sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential
+  ```
 
 ### Commands
 
-```powershell
+```bash
 git clone https://github.com/Hancie123/dirshield.git
 cd dirshield
 yarn install
 
 yarn tauri:dev      # Run the app in development mode
-yarn tauri:build    # Build the NSIS installer (src-tauri/target/release/bundle/nsis)
+yarn tauri:build    # Build installers: NSIS on Windows, .deb + .AppImage on Linux
+                    # (output in src-tauri/target/release/bundle/)
 yarn test:rust      # Run the Rust test suite
 yarn typecheck      # Type-check the frontend
 ```

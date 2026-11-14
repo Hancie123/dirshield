@@ -6,12 +6,14 @@
 //! On Windows 11 these entries appear under "Show more options" (classic menu);
 //! see docs/WINDOWS_INTEGRATION.md for the modern-menu (IExplorerCommand) notes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::domain::error::{Error, Result};
 
 pub const MENU_KEY: &str = r"Software\Classes\Directory\shell\DirShield";
+#[cfg(windows)]
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
 const RUN_VALUE: &str = "DirShield";
 
 /// (subkey, label, verb). `lock` locks in place and keeps the folder visible;
@@ -49,7 +51,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Option<ShellAction
     None
 }
 
-fn exe() -> Result<PathBuf> {
+#[cfg(windows)]
+fn exe() -> Result<std::path::PathBuf> {
     std::env::current_exe().map_err(Error::Io)
 }
 
