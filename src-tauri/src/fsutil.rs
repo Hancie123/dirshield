@@ -70,9 +70,14 @@ pub fn attrs(meta: &fs::Metadata) -> u32 {
     use std::os::windows::fs::MetadataExt;
     meta.file_attributes()
 }
+/// Off Windows only the read-only flag has a counterpart: "no write bits set".
 #[cfg(not(windows))]
-pub fn attrs(_meta: &fs::Metadata) -> u32 {
-    0
+pub fn attrs(meta: &fs::Metadata) -> u32 {
+    if meta.permissions().readonly() {
+        FILE_ATTRIBUTE_READONLY
+    } else {
+        0
+    }
 }
 
 #[cfg(windows)]
@@ -104,8 +109,29 @@ pub fn set_attrs(p: &Path, a: u32) -> Result<()> {
     let a = if a == 0 { 0x80 } else { a };
     unsafe { SetFileAttributesW(PCWSTR(w.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(a)) }.map_err(|e| Error::Win(format!("SetFileAttributes: {e}")))
 }
+/// Off Windows only the read-only flag is applied: read-only clears every write
+/// bit; writable restores the owner's write bit. Links are never followed.
 #[cfg(not(windows))]
-pub fn set_attrs(_p: &Path, _a: u32) -> Result<()> {
+pub fn set_attrs(p: &Path, a: u32) -> Result<()> {
+    let meta = fs::symlink_metadata(p)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mut perm = meta.permissions();
+    let readonly = a & FILE_ATTRIBUTE_READONLY != 0;
+    if perm.readonly() == readonly {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = perm.mode();
+        perm.set_mode(if readonly { mode & !0o222 } else { mode | 0o200 });
+    }
+    #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(readonly);
+    fs::set_permissions(p, perm)?;
     Ok(())
 }
 
