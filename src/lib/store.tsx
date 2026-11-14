@@ -43,7 +43,7 @@ export function useStore(): Store {
   return s;
 }
 
-function applyTheme(theme: string) {
+export function applyTheme(theme: string) {
   const dark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.dataset.theme = dark ? "dark" : "light";
 }

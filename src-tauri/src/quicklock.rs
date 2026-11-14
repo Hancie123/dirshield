@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::fsutil::{self, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_SYSTEM, RESTORABLE_ATTRS};
-use crate::{search, winsec};
+use crate::fsutil::{self, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM, RESTORABLE_ATTRS};
+use crate::{foldericon, search, winsec};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +37,9 @@ pub struct QuickState {
     /// Relative paths of children that were already not-indexed before locking.
     #[serde(default)]
     pub kept_not_indexed: Vec<String>,
+    /// A locked-folder icon (`desktop.ini`) was added; see `foldericon`.
+    #[serde(default)]
+    pub icon: bool,
 }
 
 const HIDE: u32 = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
@@ -49,9 +52,20 @@ fn io_hint(e: std::io::Error) -> Error {
     }
 }
 
+/// ReadOnly on a folder only tells Explorer to read its `desktop.ini` (icon).
+fn with_icon(attrs: u32, icon: bool) -> u32 {
+    if icon {
+        attrs | FILE_ATTRIBUTE_READONLY
+    } else {
+        attrs
+    }
+}
+
 /// `hide == false` locks the folder in place and leaves it visible (no move,
 /// no Hidden/System attributes); only the access restriction applies.
-pub fn lock(original: &Path, store: Option<&Path>, id: &str, hide: bool) -> Result<QuickState> {
+/// `icon_dir` (DirShield's data folder) enables the locked-folder icon for
+/// folders that stay in place.
+pub fn lock(original: &Path, store: Option<&Path>, id: &str, hide: bool, icon_dir: Option<&Path>) -> Result<QuickState> {
     let prev_attrs = fsutil::get_attrs(original)? & RESTORABLE_ATTRS;
     let mut current: PathBuf = original.to_path_buf();
     let mut moved = false;
@@ -85,7 +99,15 @@ pub fn lock(original: &Path, store: Option<&Path>, id: &str, hide: bool) -> Resu
         return Err(e);
     }
     let kept_not_indexed = search::mark_tree_not_indexed(&current);
+    // Best effort: a folder that can't take the icon is still locked.
+    let icon = match icon_dir.filter(|_| !moved) {
+        Some(dir) => foldericon::apply(&current, dir).unwrap_or(false) && fsutil::set_attrs(&current, with_icon(locked_attrs, true)).is_ok(),
+        None => false,
+    };
     if let Err(e) = winsec::apply_deny(&current) {
+        if icon {
+            let _ = foldericon::remove(&current);
+        }
         search::unmark_tree_not_indexed(&current, &kept_not_indexed);
         let _ = fsutil::set_attrs(&current, prev_attrs);
         undo_move(&current);
@@ -93,7 +115,7 @@ pub fn lock(original: &Path, store: Option<&Path>, id: &str, hide: bool) -> Resu
     }
     let search_rule = if moved { false } else { search::exclude(&current) };
     fsutil::notify_shell_changed(original);
-    Ok(QuickState { current_path: fsutil::display_path(&current), moved, prev_attrs, hidden: hide, search_rule, tree_marked: true, kept_not_indexed })
+    Ok(QuickState { current_path: fsutil::display_path(&current), moved, prev_attrs, hidden: hide, search_rule, tree_marked: true, kept_not_indexed, icon })
 }
 
 /// Reverses a Quick Lock. `dest` defaults to the original location; an
@@ -108,6 +130,9 @@ pub fn unlock(state: &QuickState, original: &Path, dest: Option<&Path>) -> Resul
         return Err(Error::Conflict(format!("\"{}\" already exists. Choose a different location to restore to.", fsutil::display_path(&target))));
     }
     winsec::remove_deny(&current)?;
+    if state.icon {
+        let _ = foldericon::remove(&current);
+    }
     if let Err(e) = fsutil::set_attrs(&current, state.prev_attrs) {
         let _ = winsec::apply_deny(&current);
         return Err(e);
@@ -118,6 +143,7 @@ pub fn unlock(state: &QuickState, original: &Path, dest: Option<&Path>) -> Resul
         }
         if let Err(e) = fsutil::rename_noreplace(&current, &target) {
             // Restore the locked state; never leave it half-unlocked.
+            // (The icon was already removed; the folder stays locked without it.)
             let relock = if state.hidden { state.prev_attrs | HIDE } else { state.prev_attrs | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED };
             let _ = fsutil::set_attrs(&current, relock);
             let _ = winsec::apply_deny(&current);
@@ -144,6 +170,7 @@ pub fn unlock(state: &QuickState, original: &Path, dest: Option<&Path>) -> Resul
 pub fn set_hidden(state: &mut QuickState, hidden: bool) -> Result<()> {
     let current = PathBuf::from(&state.current_path);
     let a = if hidden { state.prev_attrs | HIDE } else { (state.prev_attrs & !(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED };
+    let a = with_icon(a, state.icon);
     fsutil::set_attrs(&current, a)?;
     state.hidden = hidden;
     fsutil::notify_shell_changed(&current);
@@ -218,7 +245,7 @@ pub fn find_orphans(store: &Path, known_ids: &[String]) -> Result<Vec<Orphan>> {
 
 /// Returns an orphaned folder to `dest` (never overwriting anything there).
 pub fn recover_orphan(store: &Path, o: &Orphan, dest: &Path) -> Result<PathBuf> {
-    let state = QuickState { current_path: o.stored_path.clone(), moved: true, prev_attrs: o.prev_attrs & !FILE_ATTRIBUTE_SYSTEM, hidden: true, search_rule: false, tree_marked: false, kept_not_indexed: Vec::new() };
+    let state = QuickState { current_path: o.stored_path.clone(), moved: true, prev_attrs: o.prev_attrs & !FILE_ATTRIBUTE_SYSTEM, hidden: true, search_rule: false, tree_marked: false, kept_not_indexed: Vec::new(), icon: false };
     let p = unlock(&state, dest, None)?;
     let _ = fs::remove_file(sidecar_path(store, &o.id));
     Ok(p)

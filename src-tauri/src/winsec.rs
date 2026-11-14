@@ -28,12 +28,13 @@ mod imp {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
     use windows::Win32::Security::Authorization::{
-        GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, DENY_ACCESS, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, TRUSTEE_IS_SID,
+        GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, DENY_ACCESS, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID,
         TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
     };
     use windows::Win32::Security::{
         CreateWellKnownSid, DeleteAce, EqualSid, GetAce, GetAclInformation, WinWorldSid, AclSizeInformation, ACCESS_DENIED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION,
-        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT, UNPROTECTED_DACL_SECURITY_INFORMATION,
+        DACL_SECURITY_INFORMATION, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        UNPROTECTED_DACL_SECURITY_INFORMATION,
     };
 
     const ACCESS_DENIED_ACE_TYPE: u8 = 1;
@@ -140,6 +141,36 @@ mod imp {
         r
     }
 
+    /// Replaces the DACL with a single "allow Everyone `mask`" entry and blocks
+    /// inheritance, so the parent's deny ACE does not apply to this item.
+    pub fn set_protected_everyone(path: &Path, mask: u32) -> Result<()> {
+        let mut sid = everyone_sid()?;
+        let ea = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: mask,
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+                ptstrName: PWSTR(sid.as_mut_ptr() as *mut u16),
+            },
+        };
+        let mut acl: *mut ACL = std::ptr::null_mut();
+        let rc = unsafe { SetEntriesInAclW(Some(&[ea]), None, &mut acl) };
+        if rc != ERROR_SUCCESS {
+            return Err(Error::Win(format!("SetEntriesInAcl failed ({})", rc.0)));
+        }
+        let w = wide(path);
+        let rc = unsafe { SetNamedSecurityInfoW(PCWSTR(w.as_ptr()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, None, None, Some(acl), None) };
+        unsafe { LocalFree(Some(HLOCAL(acl as *mut c_void))) };
+        if rc != ERROR_SUCCESS {
+            return Err(Error::Win(format!("SetNamedSecurityInfo failed ({})", rc.0)));
+        }
+        Ok(())
+    }
+
     pub fn remove_deny(path: &Path) -> Result<()> {
         let sid = everyone_sid()?;
         let (_sd, dacl) = get_dacl(path)?;
@@ -155,7 +186,12 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{apply_deny, is_restricted, remove_deny};
+pub use imp::{apply_deny, is_restricted, remove_deny, set_protected_everyone};
+
+#[cfg(not(windows))]
+pub fn set_protected_everyone(_p: &Path, _mask: u32) -> Result<()> {
+    Ok(())
+}
 
 #[cfg(not(windows))]
 pub fn apply_deny(_p: &Path) -> Result<()> {

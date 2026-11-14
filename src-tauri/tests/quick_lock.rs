@@ -25,7 +25,7 @@ fn visible_lock_stays_in_place_and_unhidden() {
     let file = folder.join("sub").join("secret.txt");
     let file_before = fsutil::get_attrs(&file).unwrap();
 
-    let st = quicklock::lock(&folder, Some(&store), "vis1", false).unwrap();
+    let st = quicklock::lock(&folder, Some(&store), "vis1", false, None).unwrap();
     assert!(!st.moved && !st.hidden);
     assert_eq!(st.kept_not_indexed, vec!["sub".to_string()]);
     // Contents can't be listed or opened, even by full path.
@@ -51,7 +51,7 @@ fn in_place_lock_denies_access_and_unlock_restores() {
     make(&folder);
     let before = fsutil::get_attrs(&folder).unwrap() & fsutil::RESTORABLE_ATTRS;
 
-    let st = quicklock::lock(&folder, None, "id1", true).unwrap();
+    let st = quicklock::lock(&folder, None, "id1", true, None).unwrap();
     assert!(!st.moved);
     assert!(winsec::is_restricted(&folder).unwrap());
     let a = fsutil::get_attrs(&folder).unwrap();
@@ -78,7 +78,7 @@ fn moved_lock_and_unlock_never_overwrites() {
     let folder = t.path().join("Ünïcode folder");
     let store = t.path().join("store");
     make(&folder);
-    let st = quicklock::lock(&folder, Some(&store), "abc123", true).unwrap();
+    let st = quicklock::lock(&folder, Some(&store), "abc123", true, None).unwrap();
     assert!(st.moved);
     assert!(!folder.exists());
     assert!(fs::read(store.join("abc123").join("sub").join("secret.txt")).is_err());
@@ -101,7 +101,7 @@ fn orphaned_moved_folder_can_be_recovered_without_database() {
     let store = t.path().join("store");
     make(&folder);
     let id = "0123456789abcdef0123456789abcdef";
-    quicklock::lock(&folder, Some(&store), id, true).unwrap();
+    quicklock::lock(&folder, Some(&store), id, true, None).unwrap();
     // Database lost: only the store remains.
     let orphans = quicklock::find_orphans(&store, &[]).unwrap();
     assert_eq!(orphans.len(), 1);
@@ -113,4 +113,33 @@ fn orphaned_moved_folder_can_be_recovered_without_database() {
     assert!(!quicklock::sidecar_path(&store, id).exists());
     let a = fsutil::get_attrs(&folder).unwrap();
     assert!(a & (fsutil::FILE_ATTRIBUTE_HIDDEN | fsutil::FILE_ATTRIBUTE_SYSTEM) == 0);
+}
+
+#[test]
+fn visible_lock_shows_icon_and_restores_existing_desktop_ini() {
+    let t = tempfile::tempdir().unwrap();
+    let folder = t.path().join("With Icon");
+    let data = t.path().join("data");
+    make(&folder);
+    let original_ini = b"[.ShellClassInfo]\r\nInfoTip=mine\r\n".to_vec();
+    fs::write(folder.join("desktop.ini"), &original_ini).unwrap();
+    let before = fsutil::get_attrs(&folder).unwrap() & fsutil::RESTORABLE_ATTRS;
+
+    let st = quicklock::lock(&folder, None, "ico1", false, Some(&data)).unwrap();
+    assert!(st.icon);
+    assert!(fsutil::get_attrs(&folder).unwrap() & fsutil::FILE_ATTRIBUTE_READONLY != 0);
+    // Explorer can read the icon instructions, but nothing else inside.
+    let ini = fs::read(folder.join("desktop.ini")).unwrap();
+    let text = String::from_utf16_lossy(&ini[2..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>());
+    assert!(text.contains("IconResource=") && text.contains("locked-folder.ico"));
+    assert!(data.join("icons").join("locked-folder.ico").exists());
+    assert!(fs::read(folder.join("desktop.ini.dirshield")).is_err());
+    assert!(fs::read(folder.join("sub").join("secret.txt")).is_err());
+    assert!(fs::read_dir(&folder).is_err());
+
+    quicklock::unlock(&st, &folder, None).unwrap();
+    assert_eq!(fs::read(folder.join("desktop.ini")).unwrap(), original_ini);
+    assert!(!folder.join("desktop.ini.dirshield").exists());
+    assert_eq!(fsutil::get_attrs(&folder).unwrap() & fsutil::RESTORABLE_ATTRS, before);
+    assert_eq!(fs::read(folder.join("sub").join("secret.txt")).unwrap(), b"secret");
 }

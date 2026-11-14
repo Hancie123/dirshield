@@ -491,14 +491,22 @@ pub async fn quick_lock(app: AppHandle, path: String, password: String, folder_p
         let folder_password = folder_password.map(Zeroizing::new);
         st.session.master()?;
         let mk = verify_master(st, &password)?;
-        if let Some(fp) = &folder_password {
+        quick_lock_impl(app, st, &mk, &path, folder_password.as_deref().map(|s| s.as_str()), hide)
+    })
+    .await
+}
+
+/// Quick Lock with an already verified master key.
+fn quick_lock_impl(app: &AppHandle, st: &AppState, mk: &Key32, path: &str, folder_password: Option<&str>, hide: bool) -> Result<VaultInfo> {
+    {
+        if let Some(fp) = folder_password {
             auth::validate_new_password(fp)?;
         }
-        let src = validate_target(st, &mk, &path)?;
+        let src = validate_target(st, mk, path)?;
         let rep = scan::scan(&src, false)?;
         let id = crypto::random_id();
-        let state = quicklock::lock(&src, Some(&st.dirs.quick_store), &id, hide)?;
-        let mdk = crypto::metadata_key(&mk);
+        let state = quicklock::lock(&src, Some(&st.dirs.quick_store), &id, hide, Some(&st.dirs.base))?;
+        let mdk = crypto::metadata_key(mk);
         let now = now_ms();
         let key_mode = if folder_password.is_some() { "password" } else { "master" };
         let insert = st.db.lock().execute(
@@ -522,14 +530,13 @@ pub async fn quick_lock(app: AppHandle, path: String, password: String, folder_p
             let _ = quicklock::unlock(&state, &src, None);
             return Err(e.into());
         }
-        if let Some(fp) = &folder_password {
+        if let Some(fp) = folder_password {
             store_quick_verifier(st, &id, fp)?;
         }
         st.db.log("quick_lock", Some(&id), "success", None);
         emit_vaults_changed(app);
-        Ok(info(st, &mk, &load_vault(st, &id)?))
-    })
-    .await
+        Ok(info(st, mk, &load_vault(st, &id)?))
+    }
 }
 
 #[tauri::command]
@@ -542,15 +549,19 @@ pub async fn quick_unlock(app: AppHandle, id: String, credential: Credential, de
         }
         quick_verify(st, &r, &credential)?;
         let i = info(st, &mk, &r);
-        let state: QuickState = serde_json::from_str(r.quick.as_deref().unwrap_or("{}"))?;
         let dest = dest.map(PathBuf::from);
-        let final_path = quicklock::unlock(&state, Path::new(&i.original_path), dest.as_deref())?;
-        st.db.lock().execute("DELETE FROM vaults WHERE id=?1", [&id])?;
-        st.db.log("quick_unlock", Some(&id), "success", None);
-        emit_vaults_changed(app);
-        Ok(fsutil::display_path(&final_path))
+        quick_unlock_core(app, st, &r, Path::new(&i.original_path), dest.as_deref())
     })
     .await
+}
+
+fn quick_unlock_core(app: &AppHandle, st: &AppState, r: &VaultRow, original: &Path, dest: Option<&Path>) -> Result<String> {
+    let state: QuickState = serde_json::from_str(r.quick.as_deref().unwrap_or("{}"))?;
+    let final_path = quicklock::unlock(&state, original, dest)?;
+    st.db.lock().execute("DELETE FROM vaults WHERE id=?1", [&r.id])?;
+    st.db.log("quick_unlock", Some(&r.id), "success", None);
+    emit_vaults_changed(app);
+    Ok(fsutil::display_path(&final_path))
 }
 
 #[tauri::command]
@@ -562,18 +573,155 @@ pub async fn quick_set_hidden(app: AppHandle, id: String, hidden: bool, credenti
             return invalid("not a Quick Lock folder");
         }
         quick_verify(st, &r, &credential)?;
-        let mut state: QuickState = serde_json::from_str(r.quick.as_deref().unwrap_or("{}"))?;
-        quicklock::set_hidden(&mut state, hidden)?;
-        st.db.lock().execute(
-            "UPDATE vaults SET quick_state=?2, status=?3, updated_at=?4 WHERE id=?1",
-            params![id, serde_json::to_string(&state)?, if hidden { "quick_locked" } else { "quick_visible" }, now_ms()],
-        )?;
-        st.db.log(if hidden { "hide" } else { "unhide" }, Some(&id), "success", None);
-        emit_vaults_changed(app);
-        Ok(())
+        quick_set_hidden_core(app, st, &r, hidden)
     })
     .await
 }
+
+fn quick_set_hidden_core(app: &AppHandle, st: &AppState, r: &VaultRow, hidden: bool) -> Result<()> {
+    let mut state: QuickState = serde_json::from_str(r.quick.as_deref().unwrap_or("{}"))?;
+    quicklock::set_hidden(&mut state, hidden)?;
+    st.db.lock().execute(
+        "UPDATE vaults SET quick_state=?2, status=?3, updated_at=?4 WHERE id=?1",
+        params![r.id, serde_json::to_string(&state)?, if hidden { "quick_locked" } else { "quick_visible" }, now_ms()],
+    )?;
+    st.db.log(if hidden { "hide" } else { "unhide" }, Some(&r.id), "success", None);
+    emit_vaults_changed(app);
+    Ok(())
+}
+
+// ---------------- Explorer prompt window ----------------
+//
+// Right-click actions on a folder open a small password window instead of the
+// full app. These commands verify the password themselves, so they work
+// without signing in to the main window (and never sign it in).
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptVault {
+    key_mode: String,
+    hidden: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptInfo {
+    action: String,
+    path: String,
+    name: String,
+    /// The Quick Lock record for this folder, if it has one.
+    vault: Option<PromptVault>,
+}
+
+/// Quick-Locked folder at `path`. Its current location is stored in plain
+/// form, so no key is needed to find it.
+fn quick_row_at(st: &AppState, path: &str) -> Result<Option<(VaultRow, QuickState)>> {
+    let key = fsutil::path_key(Path::new(path));
+    for r in all_vaults(st)? {
+        if r.mode != "quick" {
+            continue;
+        }
+        if let Some(q) = r.quick.as_deref().and_then(|s| serde_json::from_str::<QuickState>(s).ok()) {
+            if fsutil::path_key(Path::new(&q.current_path)) == key {
+                return Ok(Some((r, q)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn prompt_action(st: &AppState) -> Result<(String, String)> {
+    let a = st.prompt.lock().unwrap().clone();
+    match a {
+        Some(ShellAction { action, path: Some(path) }) => Ok((action, path)),
+        _ => invalid("Nothing to do."),
+    }
+}
+
+fn folder_name(path: &str) -> String {
+    Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
+}
+
+#[tauri::command]
+pub async fn prompt_info(app: AppHandle) -> Result<PromptInfo> {
+    run(&app, move |_, st| {
+        let (action, path) = prompt_action(st)?;
+        let vault = quick_row_at(st, &path)?.map(|(r, q)| PromptVault { key_mode: r.key_mode, hidden: q.hidden });
+        Ok(PromptInfo { action, name: folder_name(&path), path, vault })
+    })
+    .await
+}
+
+/// Runs the prompt's action with the password the user typed: the master
+/// password, or for unlock/unhide the folder's own password when it has one.
+#[tauri::command]
+pub async fn prompt_submit(app: AppHandle, password: String) -> Result<String> {
+    run(&app, move |app, st| {
+        let password = Zeroizing::new(password);
+        let (action, path) = prompt_action(st)?;
+        let name = folder_name(&path);
+        match action.as_str() {
+            "lock" | "quick-lock" => {
+                if quick_row_at(st, &path)?.is_some() {
+                    return invalid("This folder is already locked.");
+                }
+                let mk = verify_master(st, &password)?;
+                let hide = action == "quick-lock";
+                quick_lock_impl(app, st, &mk, &path, None, hide)?;
+                Ok(if hide { format!("\u{201c}{name}\u{201d} is locked and hidden.") } else { format!("\u{201c}{name}\u{201d} is locked.") })
+            }
+            "unlock" | "unhide" => {
+                let (r, q) = quick_row_at(st, &path)?.ok_or_else(|| Error::NotFound("Quick Lock record for this folder".into()))?;
+                let mk = if r.key_mode == "master" {
+                    Some(verify_master(st, &password)?)
+                } else {
+                    quick_verify(st, &r, &Credential { kind: "folder".into(), secret: password.to_string() })?;
+                    st.session.master().ok()
+                };
+                if action == "unhide" {
+                    quick_set_hidden_core(app, st, &r, false)?;
+                    return Ok(format!("\u{201c}{name}\u{201d} is visible again. It stays locked."));
+                }
+                // The original location is encrypted metadata; for a folder
+                // locked in place it is simply where the folder is now.
+                let original = match &mk {
+                    Some(mk) => PathBuf::from(info(st, mk, &r).original_path),
+                    None if !q.moved => PathBuf::from(&q.current_path),
+                    None => return invalid("Sign in to DirShield to restore this folder."),
+                };
+                quick_unlock_core(app, st, &r, &original, None)?;
+                Ok(format!("\u{201c}{name}\u{201d} is unlocked."))
+            }
+            _ => invalid("This action needs the DirShield window."),
+        }
+    })
+    .await
+}
+
+/// Hands the prompt's action to the main window, for cases the prompt can't
+/// handle (Secure Lock folders, folders DirShield doesn't know).
+#[tauri::command]
+pub fn prompt_open_main(app: AppHandle, state: tauri::State<'_, AppState>) {
+    if let Some(a) = state.prompt.lock().unwrap().take() {
+        if state.session.is_unlocked() {
+            let _ = app.emit_to("main", "shell-action", &a);
+        } else {
+            *state.pending.lock().unwrap() = Some(a);
+        }
+    }
+    crate::show_main(&app);
+    if let Some(w) = app.get_webview_window("prompt") {
+        let _ = w.close();
+    }
+}
+
+#[tauri::command]
+pub fn prompt_close(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("prompt") {
+        let _ = w.close();
+    }
+}
+
 
 // ---------------- Secure Lock ----------------
 

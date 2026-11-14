@@ -147,6 +147,13 @@ export interface Settings {
   launchAtStartup: boolean;
 }
 
+export interface PromptInfo {
+  action: "lock" | "quick-lock" | "unlock" | "unhide";
+  path: string;
+  name: string;
+  vault: { keyMode: "master" | "password"; hidden: boolean } | null;
+}
+
 export interface ShellAction {
   action: "lock" | "quick-lock" | "secure-lock" | "unlock" | "unhide" | "settings";
   path: string | null;
@@ -211,5 +218,9 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   takePendingAction: () => invoke<ShellAction | null>("take_pending_action"),
+  promptInfo: () => invoke<PromptInfo>("prompt_info"),
+  promptSubmit: (password: string) => invoke<string>("prompt_submit", { password }),
+  promptOpenMain: () => invoke<void>("prompt_open_main"),
+  promptClose: () => invoke<void>("prompt_close"),
   openInExplorer: (path: string) => invoke<void>("open_in_explorer", { path }),
 };

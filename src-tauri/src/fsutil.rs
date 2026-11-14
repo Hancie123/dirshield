@@ -251,7 +251,10 @@ pub fn clear_readonly(p: &Path) -> Result<()> {
 /// Tell Explorer something changed so it refreshes without F5.
 #[cfg(windows)]
 pub fn notify_shell_changed(p: &Path) {
-    use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEDIR, SHCNF_PATHW, SHCNF_FLUSHNOWAIT};
+    use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEDIR, SHCNE_UPDATEITEM, SHCNF_PATHW, SHCNF_FLUSHNOWAIT};
+    // The item itself (refreshes its icon), then its parent's listing.
+    let item = wide_str(&display_path(p));
+    unsafe { SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, Some(item.as_ptr() as _), None) };
     let target = p.parent().unwrap_or(p);
     let w = wide_str(&display_path(target));
     unsafe { SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, Some(w.as_ptr() as _), None) };

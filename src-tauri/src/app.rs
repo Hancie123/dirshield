@@ -52,6 +52,8 @@ pub struct AppState {
     pub dirs: Dirs,
     pub ops: Arc<OpsManager>,
     pub pending: Mutex<Option<ShellAction>>,
+    /// Action shown in the small Explorer prompt window, if one is open.
+    pub prompt: Mutex<Option<ShellAction>>,
     pub mica: AtomicBool,
 }
 
@@ -61,7 +63,7 @@ impl AppState {
         dirs.prepare()?;
         let db = Db::open(&dirs.db)?;
         reconcile(&db)?;
-        let st = Self { db, session: Session::default(), dirs, ops: Arc::new(OpsManager::default()), pending: Mutex::new(None), mica: AtomicBool::new(false) };
+        let st = Self { db, session: Session::default(), dirs, ops: Arc::new(OpsManager::default()), pending: Mutex::new(None), prompt: Mutex::new(None), mica: AtomicBool::new(false) };
         if let Some(m) = st.db.get_setting("autoLockMinutes")?.and_then(|v| v.parse::<u64>().ok()) {
             st.session.set_timeout(std::time::Duration::from_secs(m * 60));
         }
