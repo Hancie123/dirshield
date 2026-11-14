@@ -410,13 +410,7 @@ fn vault_status(fx: &Fx) -> String {
 }
 
 fn extract(fx: &Fx, dest: &Path, include: &[&str], base: &str) -> Result<String, Error> {
-    let p = DecryptParams {
-        dest: dest.display().to_string(),
-        conflict: "fail".into(),
-        prev_status: "encrypted".into(),
-        include: include.iter().map(|s| s.to_string()).collect(),
-        base: base.into(),
-    };
+    let p = DecryptParams { dest: dest.display().to_string(), conflict: "fail".into(), prev_status: "encrypted".into(), include: include.iter().map(|s| s.to_string()).collect(), base: base.into() };
     let op = engine::create_operation(&fx.db, &fx.vault_id, "extract", &serde_json::to_string(&p).unwrap())?;
     engine::prepare_decrypt(&fx.db, &op, &fx.vault_dir, &fx.vk, &p, &Control::default())?;
     engine::run_decrypt(&DecryptJob { db: &fx.db, op_id: &op, vault_id: &fx.vault_id, vault_dir: &fx.vault_dir, vk: &fx.vk, params: &p, workers: 2, ctrl: &Control::default() })?;
