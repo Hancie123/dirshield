@@ -1,11 +1,15 @@
 //! Quick Lock: convenient privacy, NOT encryption.
 //!
 //! Steps (each one rolled back if a later one fails):
-//! 1. If the folder is on the same volume as the DirShield store, move it into
-//!    the store with an atomic rename (never a cross-volume copy).
-//! 2. Set Hidden + System + Not-Content-Indexed attributes.
-//! 3. Add an inheritable deny-Everyone ACE (see `winsec`).
-//! 4. Best-effort Windows Search exclusion for in-place locks.
+//! 1. When hiding, and the folder is on the same volume as the DirShield store,
+//!    move it into the store with an atomic rename (never a cross-volume copy).
+//! 2. When hiding, set Hidden + System attributes. Not-Content-Indexed is
+//!    always set. Without hiding, the folder stays visible where it is.
+//! 3. Mark every file and subfolder not-indexed so Windows Search drops them.
+//! 4. Add an inheritable deny-Everyone ACE (see `winsec`). This blocks every
+//!    program running as a normal user (Explorer, other file managers, the
+//!    search indexer) from listing or opening anything inside.
+//! 5. Best-effort Windows Search exclusion rule for in-place locks.
 //!
 //! Administrators, other operating systems, offline disk access and
 //! sufficiently privileged processes can bypass Quick Lock.
@@ -27,6 +31,12 @@ pub struct QuickState {
     pub prev_attrs: u32,
     pub hidden: bool,
     pub search_rule: bool,
+    /// Children were marked not-indexed at lock time (older locks: false).
+    #[serde(default)]
+    pub tree_marked: bool,
+    /// Relative paths of children that were already not-indexed before locking.
+    #[serde(default)]
+    pub kept_not_indexed: Vec<String>,
 }
 
 const HIDE: u32 = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
@@ -39,12 +49,14 @@ fn io_hint(e: std::io::Error) -> Error {
     }
 }
 
-pub fn lock(original: &Path, store: Option<&Path>, id: &str) -> Result<QuickState> {
+/// `hide == false` locks the folder in place and leaves it visible (no move,
+/// no Hidden/System attributes); only the access restriction applies.
+pub fn lock(original: &Path, store: Option<&Path>, id: &str, hide: bool) -> Result<QuickState> {
     let prev_attrs = fsutil::get_attrs(original)? & RESTORABLE_ATTRS;
     let mut current: PathBuf = original.to_path_buf();
     let mut moved = false;
 
-    if let Some(store) = store {
+    if let Some(store) = store.filter(|_| hide) {
         fs::create_dir_all(store)?;
         if fsutil::volume_root(original) == fsutil::volume_root(store) {
             let target = store.join(id);
@@ -67,18 +79,21 @@ pub fn lock(original: &Path, store: Option<&Path>, id: &str) -> Result<QuickStat
         }
     };
 
-    if let Err(e) = fsutil::set_attrs(&current, prev_attrs | HIDE) {
+    let locked_attrs = if hide { prev_attrs | HIDE } else { prev_attrs | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED };
+    if let Err(e) = fsutil::set_attrs(&current, locked_attrs) {
         undo_move(&current);
         return Err(e);
     }
+    let kept_not_indexed = search::mark_tree_not_indexed(&current);
     if let Err(e) = winsec::apply_deny(&current) {
+        search::unmark_tree_not_indexed(&current, &kept_not_indexed);
         let _ = fsutil::set_attrs(&current, prev_attrs);
         undo_move(&current);
         return Err(e);
     }
     let search_rule = if moved { false } else { search::exclude(&current) };
     fsutil::notify_shell_changed(original);
-    Ok(QuickState { current_path: fsutil::display_path(&current), moved, prev_attrs, hidden: true, search_rule })
+    Ok(QuickState { current_path: fsutil::display_path(&current), moved, prev_attrs, hidden: hide, search_rule, tree_marked: true, kept_not_indexed })
 }
 
 /// Reverses a Quick Lock. `dest` defaults to the original location; an
@@ -103,7 +118,8 @@ pub fn unlock(state: &QuickState, original: &Path, dest: Option<&Path>) -> Resul
         }
         if let Err(e) = fsutil::rename_noreplace(&current, &target) {
             // Restore the locked state; never leave it half-unlocked.
-            let _ = fsutil::set_attrs(&current, state.prev_attrs | HIDE);
+            let relock = if state.hidden { state.prev_attrs | HIDE } else { state.prev_attrs | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED };
+            let _ = fsutil::set_attrs(&current, relock);
             let _ = winsec::apply_deny(&current);
             return Err(io_hint(e));
         }
@@ -116,6 +132,9 @@ pub fn unlock(state: &QuickState, original: &Path, dest: Option<&Path>) -> Resul
     };
     if state.search_rule {
         search::remove_exclusion(&current);
+    }
+    if state.tree_marked {
+        search::unmark_tree_not_indexed(&final_path, &state.kept_not_indexed);
     }
     fsutil::notify_shell_changed(&final_path);
     Ok(final_path)
@@ -199,7 +218,7 @@ pub fn find_orphans(store: &Path, known_ids: &[String]) -> Result<Vec<Orphan>> {
 
 /// Returns an orphaned folder to `dest` (never overwriting anything there).
 pub fn recover_orphan(store: &Path, o: &Orphan, dest: &Path) -> Result<PathBuf> {
-    let state = QuickState { current_path: o.stored_path.clone(), moved: true, prev_attrs: o.prev_attrs & !FILE_ATTRIBUTE_SYSTEM, hidden: true, search_rule: false };
+    let state = QuickState { current_path: o.stored_path.clone(), moved: true, prev_attrs: o.prev_attrs & !FILE_ATTRIBUTE_SYSTEM, hidden: true, search_rule: false, tree_marked: false, kept_not_indexed: Vec::new() };
     let p = unlock(&state, dest, None)?;
     let _ = fs::remove_file(sidecar_path(store, &o.id));
     Ok(p)

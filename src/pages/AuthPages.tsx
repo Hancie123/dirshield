@@ -36,7 +36,6 @@ export function SetupPage() {
   const [step, setStep] = useState<"welcome" | "password" | "recovery">("welcome");
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
-  const [menu, setMenu] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recovery, setRecovery] = useState("");
@@ -47,7 +46,7 @@ export function SetupPage() {
     setBusy(true);
     setError(null);
     try {
-      const rk = await api.setupMaster(pw, pw2, menu);
+      const rk = await api.setupMaster(pw, pw2);
       setRecovery(rk);
       setPw("");
       setPw2("");
@@ -100,9 +99,6 @@ export function SetupPage() {
           <FluentPasswordInput label="Master password" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus />
           <StrengthMeter pw={pw} />
           <FluentPasswordInput label="Confirm master password" value={pw2} onChange={(e) => setPw2(e.target.value)} error={mismatch ? "Passwords don't match" : undefined} onKeyDown={(e) => e.key === "Enter" && ok && create()} />
-          <FluentCheckbox checked={menu} onChange={setMenu}>
-            Add DirShield to the File Explorer right-click menu
-          </FluentCheckbox>
           {error && <InfoBar severity="error">{error}</InfoBar>}
         </div>
         <div className="mt-6 flex justify-end gap-2">

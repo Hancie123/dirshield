@@ -327,7 +327,7 @@ pub async fn app_info(app: AppHandle) -> Result<AppInfo> {
 }
 
 #[tauri::command]
-pub async fn setup_master(app: AppHandle, password: String, confirm: String, register_menu: bool) -> Result<String> {
+pub async fn setup_master(app: AppHandle, password: String, confirm: String) -> Result<String> {
     run(&app, move |_, st| {
         let password = Zeroizing::new(password);
         if *password != confirm {
@@ -335,10 +335,9 @@ pub async fn setup_master(app: AppHandle, password: String, confirm: String, reg
         }
         let (mk, recovery) = auth::setup(&st.db, &password, KdfParams::new_default())?;
         st.session.unlock(mk);
-        if register_menu {
-            let ok = shell::register_context_menu().is_ok();
-            st.db.set_setting("contextMenu", if ok { "true" } else { "false" })?;
-        }
+        // The Explorer menu is on by default (the installer adds it too); turn it off in Settings.
+        let ok = shell::register_context_menu().is_ok();
+        st.db.set_setting("contextMenu", if ok { "true" } else { "false" })?;
         Ok(recovery.to_string())
     })
     .await
@@ -485,7 +484,8 @@ pub async fn vault_details(app: AppHandle, id: String) -> Result<VaultDetails> {
 // ---------------- Quick Lock ----------------
 
 #[tauri::command]
-pub async fn quick_lock(app: AppHandle, path: String, password: String, folder_password: Option<String>) -> Result<VaultInfo> {
+pub async fn quick_lock(app: AppHandle, path: String, password: String, folder_password: Option<String>, hide: Option<bool>) -> Result<VaultInfo> {
+    let hide = hide.unwrap_or(true);
     run(&app, move |app, st| {
         let password = Zeroizing::new(password);
         let folder_password = folder_password.map(Zeroizing::new);
@@ -497,13 +497,13 @@ pub async fn quick_lock(app: AppHandle, path: String, password: String, folder_p
         let src = validate_target(st, &mk, &path)?;
         let rep = scan::scan(&src, false)?;
         let id = crypto::random_id();
-        let state = quicklock::lock(&src, Some(&st.dirs.quick_store), &id)?;
+        let state = quicklock::lock(&src, Some(&st.dirs.quick_store), &id, hide)?;
         let mdk = crypto::metadata_key(&mk);
         let now = now_ms();
         let key_mode = if folder_password.is_some() { "password" } else { "master" };
         let insert = st.db.lock().execute(
             "INSERT INTO vaults(id, name, original_path, vault_path, protection_mode, key_mode, status, size_bytes, file_count, quick_state, locked_at, created_at, updated_at)
-             VALUES(?1,?2,?3,?4,'quick',?5,'quick_locked',?6,?7,?8,?9,?9,?9)",
+             VALUES(?1,?2,?3,?4,'quick',?5,?10,?6,?7,?8,?9,?9,?9)",
             params![
                 id,
                 crypto::encrypt_text(&mdk, &rep.name, &aad(&id, "name")),
@@ -513,7 +513,8 @@ pub async fn quick_lock(app: AppHandle, path: String, password: String, folder_p
                 rep.total_bytes as i64,
                 rep.total_files as i64,
                 serde_json::to_string(&state)?,
-                now
+                now,
+                if hide { "quick_locked" } else { "quick_visible" }
             ],
         );
         if let Err(e) = insert {

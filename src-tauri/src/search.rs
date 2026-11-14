@@ -1,7 +1,9 @@
 //! Windows Search privacy measures. These reduce the chance that protected
 //! content appears in Explorer search; they are NOT a security boundary.
 //!
-//! 1. `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED` on the folder (works without admin).
+//! 1. `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED` on the folder and, for Quick Lock,
+//!    on every file and subfolder inside it (works without admin). Changing the
+//!    attribute also prompts the indexer to drop items it indexed earlier.
 //! 2. A crawl-scope exclusion rule via the Windows Search COM API
 //!    (`ISearchCrawlScopeManager`). Writing crawl scope rules normally requires
 //!    administrator rights; without them this step reports `false` and the
@@ -82,4 +84,46 @@ pub fn mark_not_indexed(p: &Path) -> crate::error::Result<()> {
         fsutil::set_attrs(p, (a & fsutil::RESTORABLE_ATTRS) | fsutil::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)?;
     }
     Ok(())
+}
+
+/// Attribute bits SetFileAttributes accepts; everything else is left alone.
+const SETTABLE_ATTRS: u32 = 0x1 | 0x2 | 0x4 | 0x20 | 0x100 | 0x1000 | 0x2000 | 0x8_0000 | 0x10_0000;
+
+/// Items below `root` (not `root` itself), never following links or junctions.
+fn tree(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    walkdir::WalkDir::new(root).min_depth(1).follow_links(false).into_iter().filter_map(|e| e.ok()).filter(|e| !e.path_is_symlink())
+}
+
+fn rel(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root).map(fsutil::display_path).unwrap_or_default()
+}
+
+/// Marks every file and folder below `root` as not-indexed so Windows Search
+/// drops and skips them. Best effort: items that can't be changed are skipped.
+/// Returns the relative paths that already had the flag, so `unmark_tree`
+/// can restore the attributes exactly.
+pub fn mark_tree_not_indexed(root: &Path) -> Vec<String> {
+    let nci = fsutil::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+    let mut already = Vec::new();
+    for e in tree(root) {
+        let Ok(a) = fsutil::get_attrs(e.path()) else { continue };
+        if a & nci != 0 {
+            already.push(rel(root, e.path()));
+        } else {
+            let _ = fsutil::set_attrs(e.path(), (a & SETTABLE_ATTRS) | nci);
+        }
+    }
+    already
+}
+
+/// Reverses `mark_tree_not_indexed`, leaving items listed in `keep` flagged.
+pub fn unmark_tree_not_indexed(root: &Path, keep: &[String]) {
+    let nci = fsutil::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+    let keep: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
+    for e in tree(root) {
+        let Ok(a) = fsutil::get_attrs(e.path()) else { continue };
+        if a & nci != 0 && !keep.contains(rel(root, e.path()).as_str()) {
+            let _ = fsutil::set_attrs(e.path(), a & SETTABLE_ATTRS & !nci);
+        }
+    }
 }

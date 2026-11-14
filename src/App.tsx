@@ -43,7 +43,7 @@ function DialogHost() {
   if (!dialog) return null;
   switch (dialog.kind) {
     case "lock":
-      return <LockDialog key={dialog.path ?? dialog.mode} initialMode={dialog.mode} initialPath={dialog.path} />;
+      return <LockDialog key={dialog.path ?? dialog.mode} initialMode={dialog.mode} initialPath={dialog.path} initialHide={dialog.hide} />;
     case "unlock":
       return <UnlockDialog vault={dialog.vault} recovery={dialog.recovery} />;
     case "details":

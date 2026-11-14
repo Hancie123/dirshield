@@ -6,7 +6,7 @@ import { useNotify } from "../components/fluent";
 export type Page = "home" | "folders" | "operations" | "recovery" | "activity" | "settings" | "about";
 
 export type DialogState =
-  | { kind: "lock"; mode: "quick" | "secure"; path?: string }
+  | { kind: "lock"; mode: "quick" | "secure"; path?: string; hide?: boolean }
   | { kind: "unlock"; vault: VaultInfo; recovery?: boolean }
   | { kind: "details"; vault: VaultInfo }
   | { kind: "changePassword"; vault: VaultInfo }
@@ -116,9 +116,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
       if (a.action === "settings") return setPage("settings");
       if (!a.path) return;
-      if (a.action === "quick-lock" || a.action === "secure-lock") {
+      if (a.action === "lock" || a.action === "quick-lock" || a.action === "secure-lock") {
         setPage("home");
-        setDialog({ kind: "lock", mode: a.action === "quick-lock" ? "quick" : "secure", path: a.path });
+        setDialog({ kind: "lock", mode: a.action === "secure-lock" ? "secure" : "quick", path: a.path, hide: a.action === "quick-lock" });
         return;
       }
       try {

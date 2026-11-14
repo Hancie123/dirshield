@@ -148,7 +148,7 @@ export interface Settings {
 }
 
 export interface ShellAction {
-  action: "quick-lock" | "secure-lock" | "unlock" | "unhide" | "settings";
+  action: "lock" | "quick-lock" | "secure-lock" | "unlock" | "unhide" | "settings";
   path: string | null;
 }
 
@@ -168,7 +168,7 @@ export type ConflictPolicy = "fail" | "skip" | "rename";
 
 export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
-  setupMaster: (password: string, confirm: string, registerMenu: boolean) => invoke<string>("setup_master", { password, confirm, registerMenu }),
+  setupMaster: (password: string, confirm: string) => invoke<string>("setup_master", { password, confirm }),
   login: (password: string) => invoke<void>("login", { password }),
   logout: () => invoke<void>("logout"),
   touch: () => invoke<void>("touch"),
@@ -181,7 +181,7 @@ export const api = {
   findByPath: (path: string) => invoke<VaultInfo | null>("find_by_path", { path }),
   vaultDetails: (id: string) => invoke<VaultDetails>("vault_details", { id }),
 
-  quickLock: (path: string, password: string, folderPassword: string | null) => invoke<VaultInfo>("quick_lock", { path, password, folderPassword }),
+  quickLock: (path: string, password: string, folderPassword: string | null, hide: boolean) => invoke<VaultInfo>("quick_lock", { path, password, folderPassword, hide }),
   quickUnlock: (id: string, credential: Credential, dest: string | null) => invoke<string>("quick_unlock", { id, credential, dest }),
   quickSetHidden: (id: string, hidden: boolean, credential: Credential) => invoke<void>("quick_set_hidden", { id, hidden, credential }),
 

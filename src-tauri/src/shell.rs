@@ -14,12 +14,15 @@ pub const MENU_KEY: &str = r"Software\Classes\Directory\shell\DirShield";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "DirShield";
 
+/// (subkey, label, verb). `lock` locks in place and keeps the folder visible;
+/// `quick-lock` (kept for older registrations) locks and hides it.
 pub const VERBS: &[(&str, &str, &str)] = &[
-    ("01quick", "Quick Lock", "quick-lock"),
-    ("02secure", "Secure Lock (encrypt)", "secure-lock"),
-    ("03unlock", "Unlock Folder", "unlock"),
-    ("04unhide", "Unhide Folder", "unhide"),
-    ("05settings", "DirShield Settings", "settings"),
+    ("01lock", "Lock Folder", "lock"),
+    ("02lockhide", "Lock and Hide Folder", "quick-lock"),
+    ("03secure", "Secure Lock (encrypt)", "secure-lock"),
+    ("04unlock", "Unlock Folder", "unlock"),
+    ("05unhide", "Unhide Folder", "unhide"),
+    ("06settings", "DirShield Settings", "settings"),
 ];
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq)]
@@ -57,6 +60,8 @@ pub fn register_context_menu() -> Result<()> {
     let exe = exe()?;
     let exe_s = crate::fsutil::display_path(&exe);
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    // Start clean so entries from older versions don't linger.
+    let _ = hkcu.delete_subkey_all(MENU_KEY);
     let (root, _) = hkcu.create_subkey(MENU_KEY)?;
     root.set_value("MUIVerb", &"DirShield")?;
     root.set_value("Icon", &format!("\"{exe_s}\",0"))?;
@@ -95,7 +100,7 @@ pub fn context_menu_status() -> (bool, bool) {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let Ok(k) = hkcu.open_subkey(format!(r"{MENU_KEY}\shell\01quick\command")) else { return (false, false) };
+    let Ok(k) = hkcu.open_subkey(format!(r"{MENU_KEY}\shell\01lock\command")) else { return (false, false) };
     let cmd: String = k.get_value("").unwrap_or_default();
     let current = exe().map(|e| cmd.to_lowercase().contains(&crate::fsutil::display_path(&e).to_lowercase())).unwrap_or(false);
     (true, current)
@@ -203,6 +208,7 @@ mod tests {
             parse_args(v(&["--action", "quick-lock", r"C:\My Files (2024)\Ünïcode & ;rm -rf"])),
             Some(ShellAction { action: "quick-lock".into(), path: Some(r"C:\My Files (2024)\Ünïcode & ;rm -rf".into()) })
         );
+        assert_eq!(parse_args(v(&["--action", "lock", r"C:\A"])), Some(ShellAction { action: "lock".into(), path: Some(r"C:\A".into()) }));
         assert_eq!(parse_args(v(&["--action", "evil", "x"])), None);
         assert_eq!(parse_args(v(&["--autostart"])), None);
         assert_eq!(parse_args(v(&["--action", "settings"])), Some(ShellAction { action: "settings".into(), path: None }));

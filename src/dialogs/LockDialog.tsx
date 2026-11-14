@@ -8,11 +8,12 @@ import { KeyValue, OperationProgress, pickFolder } from "./shared";
 
 type Step = "pick" | "scanning" | "confirm" | "working" | "progress" | "done" | "failed";
 
-export function LockDialog({ initialMode, initialPath }: { initialMode: "quick" | "secure"; initialPath?: string }) {
+export function LockDialog({ initialMode, initialPath, initialHide = true }: { initialMode: "quick" | "secure"; initialPath?: string; initialHide?: boolean }) {
   const { closeDialog, info, openDialog, vaults, refresh } = useStore();
   const notify = useNotify();
   const [mode, setMode] = useState(initialMode);
   const [path, setPath] = useState(initialPath ?? "");
+  const [hide, setHide] = useState(initialHide);
   const [step, setStep] = useState<Step>(initialPath ? "scanning" : "pick");
   const [scan, setScan] = useState<ScanReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,8 +68,8 @@ export function LockDialog({ initialMode, initialPath }: { initialMode: "quick" 
     try {
       const fp = useFolderPw === "password" ? folderPw : null;
       if (mode === "quick") {
-        const v = await api.quickLock(path, password, fp);
-        notify({ severity: "success", title: "Folder locked", message: `“${v.name}” is now hidden and access-restricted.` });
+        const v = await api.quickLock(path, password, fp, hide);
+        notify({ severity: "success", title: "Folder locked", message: hide ? `“${v.name}” is now hidden and access-restricted.` : `“${v.name}” is now access-restricted. It stays visible where it is.` });
         await refresh();
         closeDialog();
       } else {
@@ -106,7 +107,7 @@ export function LockDialog({ initialMode, initialPath }: { initialMode: "quick" 
     footer = (
       <>
         <FluentButton variant="accent" disabled={!canConfirm || busy} onClick={submit}>
-          {step === "working" ? (mode === "quick" ? "Locking…" : "Preparing…") : mode === "quick" ? "Lock folder" : "Encrypt folder"}
+          {step === "working" ? (mode === "quick" ? "Locking…" : "Preparing…") : mode === "quick" ? (hide ? "Lock and hide" : "Lock folder") : "Encrypt folder"}
         </FluentButton>
         <FluentButton disabled={busy} onClick={closeDialog}>
           Cancel
@@ -155,9 +156,17 @@ export function LockDialog({ initialMode, initialPath }: { initialMode: "quick" 
                 ]}
               />
               {mode === "quick" ? (
-                <InfoBar severity="warning" title="Quick Lock is not encryption.">
-                  It hides the folder, moves it into DirShield's protected store when it's on the same drive, blocks access with Windows permissions, and asks Windows Search to skip it. Administrators, another operating system, offline disk access or privileged software can bypass it. Use Secure Lock for sensitive data.
-                </InfoBar>
+                <>
+                  <FluentCheckbox checked={hide} onChange={setHide}>
+                    Also hide the folder
+                  </FluentCheckbox>
+                  <InfoBar severity="warning" title="Quick Lock is not encryption.">
+                    {hide
+                      ? "It hides the folder, moves it into DirShield's protected store when it's on the same drive, blocks every app (including other file managers) from opening anything inside, and removes its contents from Windows Search."
+                      : "The folder stays visible where it is, but no app (Explorer or any other file manager) can open it or anything inside, and its contents are removed from Windows Search."}{" "}
+                    Administrators, another operating system, offline disk access or privileged software can bypass it. Use Secure Lock for sensitive data.
+                  </InfoBar>
+                </>
               ) : (
                 <InfoBar severity="info" title="Secure Lock encrypts everything.">
                   File contents, names and folder structure are encrypted with AES-256-GCM. Your originals stay untouched until encryption is complete and verified — you decide afterwards whether to remove them.
