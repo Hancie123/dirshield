@@ -181,6 +181,12 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
                   <div className="t-caption mt-1 text-[var(--text-2)] truncate">{scan.inaccessibleSamples.slice(0, 3).join(" · ")}</div>
                 </InfoBar>
               )}
+              {mode === "secure" && scan.badNames > 0 && (
+                <InfoBar severity="warning" title={`${formatCount(scan.badNames)} item(s) have names Secure Lock can't store.`}>
+                  Their names contain invalid characters. They'll be skipped and left in the folder, unencrypted. Rename them to include them.
+                  <div className="t-caption mt-1 text-[var(--text-2)] truncate">{scan.badNameSamples.slice(0, 3).join(" · ")}</div>
+                </InfoBar>
+              )}
               {mode === "secure" && !spaceOk && (
                 <InfoBar severity="error" title="Not enough free space.">
                   Needs about {formatBytes(scan.estimatedVaultBytes)}; {vaultFree != null ? formatBytes(vaultFree) : "less"} free. Choose another vault location under More options.

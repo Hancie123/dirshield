@@ -80,6 +80,9 @@ export interface ScanReport {
   linkSamples: string[];
   inaccessible: number;
   inaccessibleSamples: string[];
+  /** Items whose names aren't valid Unicode: Secure Lock skips them (left in place). */
+  badNames: number;
+  badNameSamples: string[];
   estimatedVaultBytes: number;
   driveType: string;
   sourceFreeBytes: number;

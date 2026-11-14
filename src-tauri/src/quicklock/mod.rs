@@ -184,22 +184,92 @@ pub fn unlock(state: &QuickState, original: &Path, dest: Option<&Path>) -> Resul
     Ok(final_path)
 }
 
+// ---------------------------------------------------------------------------
+// Keeping locked folders in place
+// ---------------------------------------------------------------------------
+
+/// Open [`acl::Pin`]s by vault id, with the path each was opened on.
+static PINS: parking_lot::Mutex<std::collections::BTreeMap<String, (String, acl::Pin)>> = parking_lot::const_mutex(std::collections::BTreeMap::new());
+
+/// Keeps the locked folder at `path` from being deleted, renamed or moved
+/// (Recycle Bin included) while DirShield runs. The deny ACE alone can't:
+/// Windows lets anyone who may delete children of the parent folder do that.
+pub fn hold(id: &str, path: &str) -> Result<()> {
+    let mut pins = PINS.lock();
+    let key = fsutil::path_key(Path::new(path));
+    if pins.get(id).is_some_and(|(k, _)| *k == key) {
+        return Ok(());
+    }
+    pins.remove(id);
+    let pin = acl::pin(Path::new(path))?;
+    pins.insert(id.to_string(), (key, pin));
+    Ok(())
+}
+
+/// Lets the folder go (before DirShield unlocks or moves it itself).
+pub fn release(id: &str) {
+    PINS.lock().remove(id);
+}
+
+/// Releases every pin whose id isn't in `ids` (folders no longer locked).
+pub fn retain_pins(ids: &[String]) {
+    PINS.lock().retain(|id, _| ids.contains(id));
+}
+
+/// The path is inside a drive's Recycle Bin.
+pub fn in_recycle_bin(p: &Path) -> bool {
+    p.components().any(|c| c.as_os_str().eq_ignore_ascii_case("$Recycle.Bin"))
+}
+
+/// What [`relocate`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Relocated {
+    /// Where it was recorded.
+    No,
+    /// Same place; the state was completed (file id recorded).
+    Updated,
+    /// Renamed or moved; `current_path` now points at it.
+    Moved,
+    /// It had been put in the Recycle Bin and was moved back to where it was.
+    Unrecycled,
+}
+
+impl Relocated {
+    /// The state changed and must be saved.
+    pub fn changed(&self) -> bool {
+        matches!(self, Relocated::Updated | Relocated::Moved)
+    }
+}
+
 /// Brings `state` up to date with where the folder actually is: a locked
 /// folder renamed or moved within its volume is found again by its file id,
-/// and a lock made before file ids were recorded gets one. Returns true if
-/// `state` changed (the caller saves it).
-pub fn relocate(state: &mut QuickState) -> bool {
+/// one put in the Recycle Bin is moved back, and a lock made before file ids
+/// were recorded gets one.
+pub fn relocate(state: &mut QuickState) -> Relocated {
     let current = PathBuf::from(&state.current_path);
     if current.is_dir() {
         if state.file_id.is_none() {
             state.file_id = fsutil::file_id(&current);
-            return state.file_id.is_some();
+            if state.file_id.is_some() {
+                return Relocated::Updated;
+            }
         }
-        return false;
+        return Relocated::No;
     }
-    let Some(found) = state.file_id.as_deref().and_then(|id| fsutil::path_by_file_id(&current, id)) else { return false };
+    let Some(found) = state.file_id.as_deref().and_then(|id| fsutil::path_by_file_id(&current, id)) else { return Relocated::No };
     if fsutil::path_key(&found) == fsutil::path_key(&current) {
-        return false;
+        return Relocated::No;
+    }
+    // Recycled while DirShield wasn't running: put it back where it was.
+    if in_recycle_bin(&found) && current.parent().is_some_and(Path::is_dir) && fsutil::rename_noreplace(&found, &current).is_ok() {
+        // Explorer's record of the deleted item ($I file next to the $R folder).
+        if let (Some(dir), Some(name)) = (found.parent(), found.file_name().and_then(|n| n.to_str())) {
+            if let Some(rest) = name.strip_prefix("$R") {
+                let _ = fs::remove_file(dir.join(format!("$I{rest}")));
+            }
+        }
+        fsutil::notify_shell_changed(&current);
+        return Relocated::Unrecycled;
     }
     // The Windows Search exclusion follows the folder.
     if state.search_rule {
@@ -207,7 +277,7 @@ pub fn relocate(state: &mut QuickState) -> bool {
         state.search_rule = search::exclude(&found);
     }
     state.current_path = fsutil::display_path(&found);
-    true
+    Relocated::Moved
 }
 
 /// Toggle visibility of a Quick-Locked folder (the access restriction stays).

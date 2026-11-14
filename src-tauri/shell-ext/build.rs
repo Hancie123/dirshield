@@ -13,6 +13,12 @@ mod menu_spec;
 fn main() {
     println!("cargo:rerun-if-env-changed=DIRSHIELD_SPARSE_PUBLISHER");
     println!("cargo:rerun-if-changed=../src/platform/menu_spec.rs");
+    println!("cargo:rerun-if-changed=exports.def");
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // COM entry points are looked up by name, never linked against.
+        let def = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("exports.def");
+        println!("cargo:rustc-cdylib-link-arg=/DEF:{}", def.display());
+    }
     let Ok(publisher) = env::var("DIRSHIELD_SPARSE_PUBLISHER") else { return };
     if publisher.trim().is_empty() || env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         return;

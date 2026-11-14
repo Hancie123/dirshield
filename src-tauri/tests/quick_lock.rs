@@ -178,11 +178,11 @@ fn renamed_locked_folder_is_found_again() {
     make(&folder);
     let mut st = quicklock::lock(&folder, None, "ren1", false, None).unwrap();
     assert!(st.file_id.is_some());
-    assert!(!quicklock::relocate(&mut st), "nothing moved yet");
+    assert_eq!(quicklock::relocate(&mut st), quicklock::Relocated::No);
 
     let renamed = t.path().join("Renamed");
     fs::rename(&folder, &renamed).expect("Windows allows renaming a Quick-Locked folder");
-    assert!(quicklock::relocate(&mut st));
+    assert_eq!(quicklock::relocate(&mut st), quicklock::Relocated::Moved);
     assert_eq!(fsutil::path_key(std::path::Path::new(&st.current_path)), fsutil::path_key(&fsutil::normalize(&renamed).unwrap()));
     assert!(acl::is_restricted(&renamed).unwrap());
 
@@ -199,7 +199,30 @@ fn old_locks_get_a_file_id() {
     make(&folder);
     let mut st = quicklock::lock(&folder, None, "old1", false, None).unwrap();
     st.file_id = None;
-    assert!(quicklock::relocate(&mut st));
+    assert_eq!(quicklock::relocate(&mut st), quicklock::Relocated::Updated);
     assert!(st.file_id.is_some());
     quicklock::unlock(&st, &folder, None).unwrap();
+}
+
+/// While DirShield holds a locked folder it can't be renamed, moved (the
+/// Recycle Bin is a move) or deleted, and it stays unreadable.
+#[test]
+fn held_folder_cannot_be_renamed_or_deleted() {
+    let t = tempfile::tempdir().unwrap();
+    let folder = t.path().join("Held");
+    make(&folder);
+    let st = quicklock::lock(&folder, None, "held1", false, None).unwrap();
+    let path = st.current_path.clone();
+    quicklock::hold("held1", &path).unwrap();
+    // The folder's own restriction is back in full after pinning.
+    assert!(acl::is_restricted(&folder).unwrap());
+    assert!(fs::read_dir(&folder).is_err());
+    assert!(fs::rename(&folder, t.path().join("Elsewhere")).is_err());
+    assert!(fs::remove_dir_all(&folder).is_err());
+    assert!(folder.is_dir());
+
+    quicklock::release("held1");
+    quicklock::unlock(&st, &folder, None).unwrap();
+    assert_eq!(fs::read(folder.join("sub").join("secret.txt")).unwrap(), b"secret");
+    fs::rename(&folder, t.path().join("Elsewhere")).unwrap();
 }

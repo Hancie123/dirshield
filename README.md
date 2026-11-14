@@ -60,7 +60,7 @@ DirShield works offline. It has no accounts, no telemetry and no cloud dependenc
 
 ### 🪟 Windows integration
 
-- **File Explorer context menu**: Quick Lock, Secure Lock, Unlock and Unhide from a right-click. It is registered per user, so it needs no admin rights.
+- **File Explorer context menu**: Quick Lock, Secure Lock, Unlock and Unhide from a right-click. It is registered per user, so it needs no admin rights. On Windows 11, releases signed with a code-signing certificate also add DirShield to the top-level menu, so you don't need **Show more options** (see [Windows 11 context menu](#windows-11-context-menu)).
 - **Windows Search exclusion** keeps protected content out of search results.
 - **Fluent design** with Mica, light and dark themes, and your system accent colour.
 - **Optional launch at startup**, with a single running instance.
@@ -243,15 +243,49 @@ dirshield/
     │   │   └── engine/          # Journaled engine: encrypt, relock, restore, verify, cleanup
     │   ├── quicklock/           # Quick Lock, NTFS ACL (acl.rs), locked-folder icon
     │   └── platform/            # Windows integration: fs, Explorer menu, Search, session events
+    ├── shell-ext/               # Windows 11 Explorer menu handler (IExplorerCommand DLL)
     ├── tests/                   # Integration tests (vault engine, Quick Lock)
-    └── windows/hooks.nsh        # Installer hooks
+    └── windows/
+        ├── hooks.nsh            # Installer hooks
+        └── sparse/              # Sparse MSIX manifest for the Windows 11 menu
 ```
+
+### Windows 11 context menu
+
+Windows 11's top-level right-click menu only shows commands from packaged
+`IExplorerCommand` handlers. Registry verbs, which DirShield always installs,
+appear under **Show more options**. Windows only registers the package, and
+Explorer only loads the handler, when the package is signed by a certificate
+the PC trusts. In practice that means a code-signing certificate from a public
+CA or Azure Trusted Signing. A self-signed certificate would have to be
+installed on every user's PC with admin rights.
+
+The pieces:
+
+| Piece | Location | Role |
+| --- | --- | --- |
+| Menu handler | `src-tauri/shell-ext/` → `dirshield_shell.dll` | A "DirShield" flyout with the same entries as the classic menu. Each entry runs `dirshield.exe --action <verb> "<folder>"`. |
+| Shared spec | `src-tauri/src/platform/menu_spec.rs` | Entries, CLSID and package name, compiled into both the app and the DLL. |
+| Sparse package | `src-tauri/windows/sparse/AppxManifest.xml` | Declares the handler. The install folder is its external location. |
+| Build script | `scripts/build-sparse-package.ps1` | Builds the DLL, packs and signs the package, and writes a Tauri config that bundles both. |
+| Registration | `platform/shell.rs` | Registers the package for the current user (no admin) when the Explorer menu is on, and removes it when the menu is turned off or DirShield is uninstalled. |
+
+To build a release with it, use a `.pfx` code-signing certificate:
+
+```bash
+pwsh scripts/build-sparse-package.ps1 -PfxPath codesign.pfx -PfxPassword <password>
+yarn tauri build --config src-tauri/target/sparse/tauri.sparse.conf.json
+```
+
+In CI, set the `WINDOWS_CERTIFICATE` (the .pfx, base64-encoded) and
+`WINDOWS_CERTIFICATE_PASSWORD` secrets. Without them, the installer is built
+exactly as before, with the classic menu only.
 
 ## Roadmap
 
 Not yet included in v1.0:
 
-- [ ] Entries in the top-level Windows 11 context menu (`IExplorerCommand`). For now, DirShield's entries appear under **Show more options**.
+- [ ] Signed releases that ship the top-level Windows 11 context menu. The handler and packaging are in place ([details](#windows-11-context-menu)); releases need a code-signing certificate. Until then, DirShield's entries appear under **Show more options**.
 - [ ] Mounting vaults as a virtual drive (WinFsp) to browse them without restoring.
 
 ## Contributing

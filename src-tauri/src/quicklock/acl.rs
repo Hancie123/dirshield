@@ -169,6 +169,70 @@ mod imp {
         Ok(())
     }
 
+    /// An open handle on a locked folder that doesn't share delete access.
+    /// While it is open, nothing can rename, move (the Recycle Bin included)
+    /// or delete the folder: Windows refuses with a sharing violation and
+    /// Explorer says the folder is open in DirShield.
+    pub struct Pin(windows::Win32::Foundation::HANDLE);
+    // A kernel handle; nothing about it is tied to the opening thread.
+    unsafe impl Send for Pin {}
+    impl Drop for Pin {
+        fn drop(&mut self) {
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+        }
+    }
+
+    fn open(path: &Path, access: u32, share: windows::Win32::Storage::FileSystem::FILE_SHARE_MODE) -> Result<Pin> {
+        use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, OPEN_EXISTING};
+        let w = wide(path);
+        let h = unsafe { CreateFileW(PCWSTR(w.as_ptr()), access, share, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None) }.map_err(|e| Error::Win(format!("CreateFile: {e}")))?;
+        Ok(Pin(h))
+    }
+
+    /// Opens a [`Pin`] on `path`. Share access is only enforced for handles
+    /// with data access, and the deny ACE refuses all of it, so the folder's
+    /// own ACE (not its children's) briefly stops denying listing while the
+    /// handle is opened, then is put back. The change is made on the folder
+    /// only (`SetKernelObjectSecurity` doesn't propagate to children).
+    pub fn pin(path: &Path) -> Result<Pin> {
+        use windows::Win32::Security::Authorization::GetSecurityInfo;
+        use windows::Win32::Security::SetKernelObjectSecurity;
+        use windows::Win32::Storage::FileSystem::{FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC};
+        let open_pin = || open(path, FILE_LIST_DIRECTORY.0, FILE_SHARE_READ | FILE_SHARE_WRITE);
+        // The owner always has READ_CONTROL and WRITE_DAC, whatever the DACL says.
+        let dac = open(path, READ_CONTROL.0 | WRITE_DAC.0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)?;
+        let sid = everyone_sid()?;
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let rc = unsafe { GetSecurityInfo(dac.0, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, None, None, Some(&mut dacl), None, Some(&mut sd)) };
+        if rc != ERROR_SUCCESS {
+            return Err(Error::Win(format!("GetSecurityInfo failed ({})", rc.0)));
+        }
+        let sd = Sd(sd);
+        let ours = find_ours(dacl, &sid)?;
+        if ours.is_empty() {
+            return open_pin();
+        }
+        let set_mask = |mask: u32| -> Result<()> {
+            for &i in &ours {
+                let mut ace: *mut c_void = std::ptr::null_mut();
+                unsafe { GetAce(dacl, i, &mut ace) }.map_err(|e| Error::Win(format!("GetAce: {e}")))?;
+                unsafe { (*(ace as *mut ACCESS_DENIED_ACE)).Mask = mask };
+            }
+            unsafe { SetKernelObjectSecurity(dac.0, DACL_SECURITY_INFORMATION, sd.0) }.map_err(|e| Error::Win(format!("SetKernelObjectSecurity: {e}")))
+        };
+        set_mask(DENY_MASK & !FILE_LIST_DIRECTORY.0)?;
+        let pinned = open_pin();
+        if set_mask(DENY_MASK).is_err() {
+            // Never leave the folder listable.
+            drop(pinned);
+            let _ = remove_deny(path);
+            apply_deny(path)?;
+            return Err(Error::Win("couldn't restore the folder's access restriction".into()));
+        }
+        pinned
+    }
+
     pub fn remove_deny(path: &Path) -> Result<()> {
         let sid = everyone_sid()?;
         let (_sd, dacl) = get_dacl(path)?;
@@ -184,7 +248,14 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{apply_deny, is_restricted, remove_deny, set_protected_everyone};
+pub use imp::{apply_deny, is_restricted, pin, remove_deny, set_protected_everyone, Pin};
+
+#[cfg(not(windows))]
+pub struct Pin;
+#[cfg(not(windows))]
+pub fn pin(_p: &Path) -> Result<Pin> {
+    Ok(Pin)
+}
 
 #[cfg(not(windows))]
 pub fn set_protected_everyone(_p: &Path, _mask: u32) -> Result<()> {

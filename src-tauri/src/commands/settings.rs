@@ -113,11 +113,7 @@ pub async fn activity_facets(app: AppHandle) -> Result<ActivityFacets> {
             .filter_map(|(id, n)| crypto::decrypt_text(&mdk, &n, &aad(&id, "name")).ok().map(|name| ActivityFolder { id, name }))
             .collect::<Vec<_>>();
         folders.sort_by_key(|f| f.name.to_lowercase());
-        let has_removed = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM activity_logs a LEFT JOIN vaults v ON v.id=a.vault_id WHERE a.vault_id IS NOT NULL AND v.id IS NULL)",
-            [],
-            |r| r.get(0),
-        )?;
+        let has_removed = c.query_row("SELECT EXISTS(SELECT 1 FROM activity_logs a LEFT JOIN vaults v ON v.id=a.vault_id WHERE a.vault_id IS NOT NULL AND v.id IS NULL)", [], |r| r.get(0))?;
         Ok(ActivityFacets { actions, folders, has_removed })
     })
     .await

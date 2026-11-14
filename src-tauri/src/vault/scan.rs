@@ -27,6 +27,11 @@ pub struct ScanReport {
     pub link_samples: Vec<String>,
     pub inaccessible: u64,
     pub inaccessible_samples: Vec<String>,
+    /// Files and folders whose names (or a parent folder's name) aren't valid
+    /// Unicode. Secure Lock can't store them: they are skipped and left in
+    /// place. Not included in the totals.
+    pub bad_names: u64,
+    pub bad_name_samples: Vec<String>,
     pub estimated_vault_bytes: u64,
     pub drive_type: String,
     pub source_free_bytes: u64,
@@ -67,6 +72,14 @@ pub fn scan(root: &Path, probe_open: bool) -> Result<ScanReport> {
                 continue;
             }
         };
+        if entry.path().strip_prefix(root).ok().and_then(|p| p.to_str()).is_none() {
+            r.bad_names += 1;
+            if r.bad_name_samples.len() < SAMPLES {
+                // Lossy: the invalid part shows as U+FFFD.
+                r.bad_name_samples.push(fsutil::display_path(entry.path()));
+            }
+            continue;
+        }
         let ft = entry.file_type();
         if ft.is_symlink() {
             r.links += 1;

@@ -29,6 +29,7 @@ pub async fn free_space(app: AppHandle, path: String) -> Result<u64> {
 pub(crate) fn sync_quick_locations(st: &AppState, mk: Option<&[u8; 32]>) -> bool {
     let Ok(rows) = all_vaults(st) else { return false };
     let mut changed = false;
+    let mut locked = Vec::new();
     for id in rows.into_iter().filter(|r| r.mode == "quick").map(|r| r.id) {
         let _guard = st.quick_guard.lock();
         let Ok(r) = load_vault(st, &id) else { continue };
@@ -36,18 +37,31 @@ pub(crate) fn sync_quick_locations(st: &AppState, mk: Option<&[u8; 32]>) -> bool
             continue;
         }
         let Some(mut q) = r.quick.as_deref().and_then(|s| serde_json::from_str::<QuickState>(s).ok()) else { continue };
-        let old = q.current_path.clone();
+        locked.push(r.id.clone());
         let mut sets: Vec<(&str, String)> = Vec::new();
-        if quicklock::relocate(&mut q) {
+        let rel = quicklock::relocate(&mut q);
+        if rel.changed() {
             if let Ok(json) = serde_json::to_string(&q) {
                 sets.push(("quick_state", json));
                 sets.push(("vault_path", q.current_path.clone()));
             }
-            if fsutil::path_key(Path::new(&old)) != fsutil::path_key(Path::new(&q.current_path)) {
-                st.db.log("quick_lock_moved", Some(&r.id), "warning", Some("the locked folder was renamed or moved outside DirShield"));
-            }
         }
-        if let Some(mk) = mk.filter(|_| !q.moved) {
+        match rel {
+            quicklock::Relocated::Moved => st.db.log("quick_lock_moved", Some(&r.id), "warning", Some("the locked folder was renamed or moved outside DirShield")),
+            quicklock::Relocated::Unrecycled => {
+                st.db.log("quick_lock_unrecycled", Some(&r.id), "warning", Some("the locked folder was put in the Recycle Bin while DirShield wasn't running"));
+                changed = true;
+            }
+            _ => {}
+        }
+        let here = Path::new(&q.current_path);
+        // Keep it from being deleted, moved or recycled while DirShield runs.
+        if here.is_dir() && !quicklock::in_recycle_bin(here) {
+            let _ = quicklock::hold(&r.id, &q.current_path);
+        }
+        // A folder still in the Recycle Bin (its old place was taken) keeps
+        // its name and recorded location.
+        if let Some(mk) = mk.filter(|_| !q.moved && !quicklock::in_recycle_bin(here)) {
             let current = info(st, mk, &r).original_path;
             if fsutil::path_key(Path::new(&current)) != fsutil::path_key(Path::new(&q.current_path)) && Path::new(&q.current_path).is_dir() {
                 let mdk = crypto::metadata_key(mk);
@@ -62,6 +76,7 @@ pub(crate) fn sync_quick_locations(st: &AppState, mk: Option<&[u8; 32]>) -> bool
             }
         }
     }
+    quicklock::retain_pins(&locked);
     changed
 }
 
@@ -205,6 +220,8 @@ pub(super) fn quick_lock_impl(app: &AppHandle, st: &AppState, mk: &Key32, path: 
         if let Some(fp) = folder_password {
             store_quick_verifier(st, &id, fp)?;
         }
+        // From now on it can't be deleted, moved or put in the Recycle Bin.
+        let _ = quicklock::hold(&id, &state.current_path);
         st.db.log("quick_lock", Some(&id), "success", None);
         emit_vaults_changed(app);
         Ok(info(st, mk, &load_vault(st, &id)?))
@@ -234,6 +251,7 @@ pub(super) fn quick_unlock_core(app: &AppHandle, st: &AppState, r: &VaultRow, or
     let _guard = st.quick_guard.lock();
     // Renamed or moved since the last check: unlock it where it is now.
     quicklock::relocate(&mut state);
+    quicklock::release(&r.id);
     let final_path = quicklock::unlock(&state, original, dest)?;
     st.db.lock().execute("DELETE FROM vaults WHERE id=?1", [&r.id])?;
     st.db.log("quick_unlock", Some(&r.id), "success", None);

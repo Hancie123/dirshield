@@ -634,3 +634,30 @@ fn browse_index_lists_folders_and_decrypts_single_files() {
     // Never overwrites.
     assert!(ix.decrypt_file(&fx.vault_dir, &fx.vk, &f, &out).is_err());
 }
+
+/// NTFS allows names that aren't valid Unicode (unpaired surrogates). They
+/// can't go in the manifest: they're skipped and left in place, flagged by
+/// the scan, and the rest of the folder is still locked.
+#[cfg(windows)]
+#[test]
+fn invalid_unicode_names_are_skipped_not_fatal() {
+    use std::os::windows::ffi::OsStringExt;
+    let bad = |s: &str| std::ffi::OsString::from_wide(&[&[0xD800u16][..], &s.encode_utf16().collect::<Vec<_>>()].concat());
+    let fx = setup(|s| {
+        write(&s.join("good.txt"), b"good");
+        write(&s.join(bad("file.txt")), b"bad file");
+        write(&s.join(bad("dir")).join("inner.txt"), b"in a bad folder");
+    });
+    let report = dirshield_lib::vault::scan::scan(&fx.source, true).unwrap();
+    assert_eq!(report.bad_names, 3, "the file, the folder and the file inside it");
+    assert_eq!(report.total_files, 1);
+    encrypt(&fx, &Control::default()).unwrap();
+    let rep = engine::remove_originals(&fx.vault_dir, &fx.vk, &fx.source, &Control::default()).unwrap();
+    assert_eq!(rep.removed_files, 1);
+    assert_eq!(fs::read(fx.source.join(bad("file.txt"))).unwrap(), b"bad file");
+    assert!(fx.source.join(bad("dir")).join("inner.txt").exists());
+    let dest = fx.root.join("r");
+    restore(&fx, &dest, "fail").unwrap();
+    assert_eq!(fs::read(dest.join("good.txt")).unwrap(), b"good");
+    assert_eq!(fs::read_dir(&dest).unwrap().count(), 1);
+}

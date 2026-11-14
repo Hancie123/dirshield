@@ -12,6 +12,13 @@ name: Build
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
 # Without them (e.g. pull requests from forks) installers are still built,
 # just without updater signatures; a release requires them.
+#
+# Optional, for the Windows 11 top-level Explorer menu:
+#   WINDOWS_CERTIFICATE                 base64 of a code-signing .pfx (public CA)
+#   WINDOWS_CERTIFICATE_PASSWORD        its password
+# With them, the installer also ships a signed sparse package that puts
+# DirShield in the top-level menu. Without them the installer is the same as
+# before: the menu is under "Show more options" on Windows 11.
 
 on:
   push:
@@ -74,7 +81,7 @@ jobs:
           components: rustfmt
 
       - name: cargo fmt --check
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
 
       - uses: actions/setup-node@v4
         with:
@@ -148,10 +155,32 @@ jobs:
 
       # Per OS: most Windows code is behind cfg(windows).
       - name: cargo clippy -D warnings
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings
 
       - name: Run Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace
+
+      # Signed sparse package for the Windows 11 top-level Explorer menu
+      # (scripts/build-sparse-package.ps1). Skipped without a certificate.
+      - name: Windows 11 Explorer menu package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Output "::notice::No code-signing certificate: building without the Windows 11 top-level menu (the classic menu is unaffected)."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          try {
+            ./scripts/build-sparse-package.ps1 -PfxPath $pfx -PfxPassword $env:WINDOWS_CERTIFICATE_PASSWORD
+          } finally {
+            Remove-Item $pfx -Force
+          }
+          "SPARSE_CONFIG=src-tauri/target/sparse/tauri.sparse.conf.json" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Build app
         shell: bash
@@ -160,14 +189,17 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           RELEASE: ${{ needs.version.outputs.release }}
         run: |
+          # Adds the Windows 11 menu package when the step above built one.
+          EXTRA=()
+          if [ -n "${SPARSE_CONFIG:-}" ]; then EXTRA=(--config "$SPARSE_CONFIG"); fi
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            yarn tauri build --bundles ${{ matrix.bundles }}
+            yarn tauri build --bundles ${{ matrix.bundles }} "${EXTRA[@]}"
           elif [ "$RELEASE" = "true" ]; then
             echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; a release needs signed updater artifacts."
             exit 1
           else
             echo "::warning::No updater signing key available; building without updater signatures."
-            yarn tauri build --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            yarn tauri build --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":false}}' "${EXTRA[@]}"
           fi
 
       - uses: actions/upload-artifact@v4

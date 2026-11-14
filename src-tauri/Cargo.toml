@@ -6,6 +6,10 @@ authors = ["Mero Vision Pvt. Ltd"]
 edition = "2021"
 rust-version = "1.89"
 
+# shell-ext: the Windows 11 Explorer menu handler (a separate DLL).
+[workspace]
+members = ["shell-ext"]
+
 [lib]
 name = "dirshield_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -63,6 +67,9 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
+    # Windows 11 Explorer menu: registering the sparse package (PackageManager)
+    "ApplicationModel",
+    "Management_Deployment",
     # Windows Hello (KeyCredentialManager)
     "Foundation",
     "Security_Credentials",

@@ -35,6 +35,10 @@ use platform::{session_events, shell};
 use security::auth;
 
 pub fn run() {
+    // Installer helpers (Windows 11 menu package): no window, no database.
+    if let Some(code) = shell::installer_command(std::env::args().skip(1)) {
+        std::process::exit(code);
+    }
     let uninstall = std::env::args().any(|a| a == CONFIRM_UNINSTALL_ARG);
     UNINSTALL_MODE.store(uninstall, Ordering::Relaxed);
     let state = match AppState::new() {

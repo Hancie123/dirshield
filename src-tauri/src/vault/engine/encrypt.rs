@@ -152,7 +152,14 @@ pub(super) fn journal_tree(db: &Db, op_id: &str, source: &Path, ctrl: &Control, 
             t.skipped += 1;
             continue;
         }
-        let rel = rel_string(source, entry.path())?;
+        // NTFS allows names that aren't valid Unicode (unpaired surrogates);
+        // the manifest can't hold them. Skip such items (and everything in
+        // such a folder, whose paths contain the name) like unreadable ones:
+        // they stay in the folder, unencrypted, and are counted as skipped.
+        let Ok(rel) = rel_string(source, entry.path()) else {
+            t.skipped += 1;
+            continue;
+        };
         let kind = if meta.is_dir() { "d" } else { "f" };
         if kind == "d" {
             t.dirs += 1;

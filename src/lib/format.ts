@@ -138,6 +138,7 @@ const actionLabels: Record<string, string> = {
   activity_exported: "Activity exported",
   quick_lock_reapplied: "Quick Lock put back",
   quick_lock_moved: "Locked folder renamed or moved",
+  quick_lock_unrecycled: "Locked folder taken out of the Recycle Bin",
   work_session_recovered: "Work session recovered",
 };
 /** Every known action label, keyed by action code. */
