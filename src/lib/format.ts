@@ -1,0 +1,137 @@
+import type { OpStatus, OpType, VaultStatus } from "./api";
+
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  const units = ["bytes", "KB", "MB", "GB", "TB", "PB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  if (i === 0) return `${n} ${n === 1 ? "byte" : "bytes"}`;
+  return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
+}
+
+export function formatCount(n: number): string {
+  return new Intl.NumberFormat().format(n);
+}
+
+export function formatDuration(secs: number | null | undefined): string {
+  if (secs == null || !Number.isFinite(secs)) return "Calculating…";
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s} sec`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ${s % 60} sec`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} hr ${m % 60} min`;
+  return `${Math.floor(h / 24)} days ${h % 24} hr`;
+}
+
+export function formatDate(ms: number | null | undefined): string {
+  if (!ms) return "—";
+  return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+export function relativeTime(ms: number): string {
+  const d = Date.now() - ms;
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  if (d < 60_000) return "Just now";
+  if (d < 3_600_000) return rtf.format(-Math.round(d / 60_000), "minute");
+  if (d < 86_400_000) return rtf.format(-Math.round(d / 3_600_000), "hour");
+  if (d < 7 * 86_400_000) return rtf.format(-Math.round(d / 86_400_000), "day");
+  return formatDate(ms);
+}
+
+export const vaultStatusLabel: Record<VaultStatus, string> = {
+  quick_locked: "Locked and hidden",
+  quick_visible: "Locked (visible)",
+  encrypting: "Encrypting",
+  incomplete: "Incomplete",
+  encrypted: "Encrypted · originals kept",
+  removing: "Removing originals",
+  locked: "Encrypted",
+  restoring: "Restoring",
+  restored: "Restored",
+};
+
+export type Tone = "success" | "caution" | "critical" | "neutral" | "accent";
+
+export function vaultTone(s: VaultStatus): Tone {
+  switch (s) {
+    case "locked":
+    case "quick_locked":
+      return "success";
+    case "encrypted":
+    case "quick_visible":
+      return "caution";
+    case "incomplete":
+      return "critical";
+    case "encrypting":
+    case "restoring":
+    case "removing":
+      return "accent";
+    default:
+      return "neutral";
+  }
+}
+
+export const opTypeLabel: Record<OpType, string> = {
+  encrypt: "Encryption",
+  decrypt: "Restore",
+  verify: "Integrity check",
+  cleanup: "Remove originals",
+};
+
+export const opStatusLabel: Record<OpStatus, string> = {
+  running: "Running",
+  paused: "Paused",
+  interrupted: "Interrupted",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  completed: "Completed",
+};
+
+export function opTone(s: OpStatus): Tone {
+  return s === "completed" ? "success" : s === "failed" || s === "interrupted" ? "critical" : s === "cancelled" || s === "paused" ? "caution" : "accent";
+}
+
+const actionLabels: Record<string, string> = {
+  setup: "DirShield set up",
+  sign_in: "Signed in",
+  authentication: "Sign-in or password check",
+  auto_lock: "Locked after inactivity",
+  quick_lock: "Quick Lock",
+  quick_unlock: "Quick Lock removed",
+  hide: "Folder hidden",
+  unhide: "Folder unhidden",
+  secure_lock: "Secure Lock",
+  restore: "Folder restored",
+  verify_vault: "Integrity check",
+  remove_originals: "Originals removed",
+  delete_vault: "Vault deleted",
+  change_master_password: "Master password changed",
+  reset_master_password_with_recovery_key: "Master password reset with recovery key",
+  change_folder_password: "Folder password changed",
+  import_vault: "Vault imported",
+  resume_operation: "Operation resumed",
+  discard_operation: "Operation discarded",
+  settings_changed: "Settings changed",
+  recovered_after_restart: "Recovered after restart",
+  recover_orphan: "Orphaned folder returned",
+};
+export function actionLabel(a: string): string {
+  return actionLabels[a] ?? a.replace(/_/g, " ");
+}
+
+export function passwordStrength(pw: string): { score: number; label: string } {
+  let score = 0;
+  if (pw.length >= 8) score++;
+  if (pw.length >= 12) score++;
+  if (pw.length >= 16) score++;
+  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
+  if (/\d/.test(pw)) score++;
+  if (/[^A-Za-z0-9]/.test(pw)) score++;
+  const s = Math.min(4, Math.floor((score * 4) / 6));
+  return { score: s, label: ["Too weak", "Weak", "Fair", "Good", "Strong"][s] };
+}

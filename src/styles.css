@@ -1,0 +1,182 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Windows 11 Fluent design tokens (values follow WinUI 3 theme resources).
+   --accent-base is replaced at runtime with the user's Windows accent colour.
+--------------------------------------------------------------------------- */
+:root {
+  --accent-base: #0078d4;
+  color-scheme: light;
+  --app-bg: #f3f3f3;
+  --layer: rgba(255, 255, 255, 0.5);
+  --card: rgba(255, 255, 255, 0.7);
+  --card-hover: rgba(249, 249, 249, 0.5);
+  --card-solid: #fbfbfb;
+  --stroke-card: rgba(0, 0, 0, 0.0578);
+  --stroke-divider: rgba(0, 0, 0, 0.0803);
+  --stroke-control: rgba(0, 0, 0, 0.0578);
+  --stroke-control-bottom: rgba(0, 0, 0, 0.1622);
+  --stroke-strong: rgba(0, 0, 0, 0.4458);
+  --fill-control: rgba(255, 255, 255, 0.7);
+  --fill-control-hover: rgba(249, 249, 249, 0.5);
+  --fill-control-press: rgba(249, 249, 249, 0.3);
+  --fill-input-focus: #ffffff;
+  --fill-subtle-hover: rgba(0, 0, 0, 0.0373);
+  --fill-subtle-press: rgba(0, 0, 0, 0.0241);
+  --fill-disabled: rgba(249, 249, 249, 0.3);
+  --text-1: rgba(0, 0, 0, 0.896);
+  --text-2: rgba(0, 0, 0, 0.606);
+  --text-3: rgba(0, 0, 0, 0.4458);
+  --text-disabled: rgba(0, 0, 0, 0.3614);
+  --accent: color-mix(in srgb, var(--accent-base) 82%, black);
+  --accent-hover: color-mix(in srgb, var(--accent) 90%, white);
+  --accent-press: color-mix(in srgb, var(--accent) 80%, white);
+  --on-accent: #ffffff;
+  --accent-text: var(--accent);
+  --smoke: rgba(0, 0, 0, 0.3);
+  --dialog-bg: #ffffff;
+  --dialog-footer: #f3f3f3;
+  --flyout: rgba(252, 252, 252, 0.96);
+  --success: #0f7b0f;
+  --success-bg: #dff6dd;
+  --caution: #9d5d00;
+  --caution-bg: #fff4ce;
+  --critical: #c42b1c;
+  --critical-bg: #fde7e9;
+  --info-bg: rgba(246, 246, 246, 0.6);
+  --shadow-card: 0 2px 4px rgba(0, 0, 0, 0.04);
+  --shadow-flyout: 0 8px 16px rgba(0, 0, 0, 0.14);
+  --shadow-dialog: 0 32px 64px rgba(0, 0, 0, 0.1876), 0 2px 21px rgba(0, 0, 0, 0.1474);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --app-bg: #202020;
+  --layer: rgba(58, 58, 58, 0.3);
+  --card: rgba(255, 255, 255, 0.0512);
+  --card-hover: rgba(255, 255, 255, 0.0837);
+  --card-solid: #2b2b2b;
+  --stroke-card: rgba(0, 0, 0, 0.1);
+  --stroke-divider: rgba(255, 255, 255, 0.0837);
+  --stroke-control: rgba(255, 255, 255, 0.0698);
+  --stroke-control-bottom: rgba(255, 255, 255, 0.0698);
+  --stroke-strong: rgba(255, 255, 255, 0.5442);
+  --fill-control: rgba(255, 255, 255, 0.0605);
+  --fill-control-hover: rgba(255, 255, 255, 0.0837);
+  --fill-control-press: rgba(255, 255, 255, 0.0326);
+  --fill-input-focus: rgba(30, 30, 30, 0.7);
+  --fill-subtle-hover: rgba(255, 255, 255, 0.0605);
+  --fill-subtle-press: rgba(255, 255, 255, 0.0419);
+  --fill-disabled: rgba(255, 255, 255, 0.0419);
+  --text-1: #ffffff;
+  --text-2: rgba(255, 255, 255, 0.786);
+  --text-3: rgba(255, 255, 255, 0.5442);
+  --text-disabled: rgba(255, 255, 255, 0.3628);
+  --accent: color-mix(in srgb, var(--accent-base) 45%, white);
+  --accent-hover: color-mix(in srgb, var(--accent) 90%, black);
+  --accent-press: color-mix(in srgb, var(--accent) 80%, black);
+  --on-accent: #000000;
+  --accent-text: var(--accent);
+  --smoke: rgba(0, 0, 0, 0.3);
+  --dialog-bg: #2b2b2b;
+  --dialog-footer: #202020;
+  --flyout: rgba(44, 44, 44, 0.96);
+  --success: #6ccb5f;
+  --success-bg: #393d1b;
+  --caution: #fce100;
+  --caution-bg: #433519;
+  --critical: #ff99a4;
+  --critical-bg: #442726;
+  --info-bg: rgba(255, 255, 255, 0.0326);
+  --shadow-card: 0 2px 4px rgba(0, 0, 0, 0.13);
+  --shadow-flyout: 0 8px 16px rgba(0, 0, 0, 0.26);
+  --shadow-dialog: 0 32px 64px rgba(0, 0, 0, 0.37), 0 2px 21px rgba(0, 0, 0, 0.37);
+}
+
+@theme inline {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --color-app: var(--app-bg);
+  --color-layer: var(--layer);
+  --color-card: var(--card);
+  --color-card-hover: var(--card-hover);
+  --color-stroke: var(--stroke-card);
+  --color-divider: var(--stroke-divider);
+  --color-text-1: var(--text-1);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-accent: var(--accent);
+  --color-subtle-hover: var(--fill-subtle-hover);
+  --color-success: var(--success);
+  --color-caution: var(--caution);
+  --color-critical: var(--critical);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--text-1);
+  background: var(--app-bg);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+}
+
+/* With Mica the window backdrop shows through; the app paints no base layer. */
+html.mica body {
+  background: transparent;
+}
+
+input,
+textarea,
+select,
+.selectable {
+  user-select: text;
+}
+
+.font-display {
+  font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+}
+
+/* Fluent type ramp */
+.t-title-large { font-size: 40px; line-height: 52px; font-weight: 600; }
+.t-title { font-size: 28px; line-height: 36px; font-weight: 600; }
+.t-subtitle { font-size: 20px; line-height: 28px; font-weight: 600; }
+.t-body-strong { font-size: 14px; line-height: 20px; font-weight: 600; }
+.t-caption { font-size: 12px; line-height: 16px; }
+
+/* Scrollbars in the WinUI style: thin, appear on hover */
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 6px; border: 4px solid transparent; background-clip: content-box; }
+*:hover::-webkit-scrollbar-thumb { background-color: var(--text-3); }
+::-webkit-scrollbar-thumb:hover { border-width: 3px; }
+
+:focus-visible {
+  outline: 2px solid var(--text-1);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+@keyframes fl-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fl-dialog-in { from { opacity: 0; transform: scale(1.05); } to { opacity: 1; transform: scale(1); } }
+@keyframes fl-flyout-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fl-page-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fl-indeterminate { 0% { left: -40%; } 100% { left: 100%; } }
+@keyframes fl-spin { to { transform: rotate(360deg); } }
+
+.anim-fade { animation: fl-fade-in 0.167s ease-out; }
+.anim-dialog { animation: fl-dialog-in 0.167s cubic-bezier(0, 0, 0, 1); }
+.anim-flyout { animation: fl-flyout-in 0.167s cubic-bezier(0, 0, 0, 1); }
+.anim-page { animation: fl-page-in 0.25s cubic-bezier(0, 0, 0, 1); }
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade, .anim-dialog, .anim-flyout, .anim-page { animation: none; }
+}
