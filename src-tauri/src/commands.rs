@@ -444,9 +444,12 @@ pub fn touch(state: tauri::State<'_, AppState>) {
 
 /// Strength estimate for a password being chosen (meter in the UI). The same
 /// estimate gates new master passwords in `auth::validate_master_password`.
+/// Runs on a worker thread: a synchronous command would run on the UI thread
+/// and freeze every window while zxcvbn works.
 #[tauri::command]
-pub fn password_strength(password: String) -> auth::PasswordStrength {
-    auth::password_strength(&Zeroizing::new(password))
+pub async fn password_strength(password: String) -> auth::PasswordStrength {
+    let password = Zeroizing::new(password);
+    tauri::async_runtime::spawn_blocking(move || auth::password_strength(&password)).await.unwrap_or(auth::PasswordStrength { score: 0, warning: None, suggestions: vec![] })
 }
 
 #[tauri::command]

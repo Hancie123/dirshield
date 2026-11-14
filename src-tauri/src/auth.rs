@@ -74,6 +74,13 @@ pub fn password_strength(pw: &str) -> PasswordStrength {
     if pw.is_empty() || pw.len() > 1024 {
         return PasswordStrength { score: 0, warning: None, suggestions: vec![] };
     }
+    // zxcvbn's matching gets very slow on long inputs; like the reference
+    // implementation, only the first 100 characters are analysed. Anything
+    // longer that passes those is a long passphrase anyway.
+    let pw: &str = match pw.char_indices().nth(100) {
+        Some((i, _)) => &pw[..i],
+        None => pw,
+    };
     let e = zxcvbn::zxcvbn(pw, &["dirshield", "dir shield", "folder", "lock"]);
     let (warning, suggestions) = match e.feedback() {
         Some(f) => (f.warning().map(|w| w.to_string()), f.suggestions().iter().map(|s| s.to_string()).collect()),
@@ -345,6 +352,14 @@ mod tests {
     fn short_passwords_rejected() {
         let (_d, db) = db();
         assert!(setup(&db, "short", KdfParams::new_test()).is_err());
+    }
+
+    #[test]
+    fn strength_is_fast_on_long_input() {
+        let long = "a1b2c3d4e5".repeat(100);
+        let t = std::time::Instant::now();
+        password_strength(&long);
+        assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
     }
 
     #[test]
