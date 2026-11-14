@@ -11,6 +11,8 @@ pub struct BrowseInfo {
     name: String,
     files: u64,
     bytes: u64,
+    /// Shown next to "Open": what opening a file leaves on disk.
+    open_caveat: &'static str,
 }
 
 pub(super) fn close_browsers_for(st: &AppState, vault_id: &str) {
@@ -48,7 +50,7 @@ pub async fn browse_open(app: AppHandle, id: String, credential: Credential) -> 
         let dir = PathBuf::from(&r.vault_path);
         let index = VaultIndex::load(&dir, &vk)?;
         let token = crypto::random_id();
-        let out = BrowseInfo { token: token.clone(), name: index.root_name.clone(), files: index.files, bytes: index.bytes };
+        let out = BrowseInfo { token: token.clone(), name: index.root_name.clone(), files: index.files, bytes: index.bytes, open_caveat: browse::WIPE_CAVEAT };
         st.browse.lock().insert(token, std::sync::Arc::new(BrowseSession { vault_id: id.clone(), vault_dir: dir, vk, index, opened: Default::default() }));
         st.db.log("browse_vault", Some(&id), "success", None);
         Ok(out)
@@ -94,8 +96,10 @@ pub async fn browse_extract(app: AppHandle, token: String, paths: Vec<String>, d
 }
 
 /// Decrypts one file into a private temp folder and opens it with its
-/// default app. The copy is read-only and is wiped when the vault browser
-/// closes, when DirShield locks or exits, or at the next start.
+/// default app. The copy is read-only, marked as downloaded from the internet,
+/// and is overwritten and deleted when the vault browser closes, when
+/// DirShield locks or exits, or at the next start (not a secure erase on SSDs;
+/// see `browse::WIPE_CAVEAT`).
 #[tauri::command]
 pub async fn browse_open_file(app: AppHandle, token: String, path: String) -> Result<()> {
     run(&app, move |_, st| {
@@ -114,6 +118,11 @@ pub async fn browse_open_file(app: AppHandle, token: String, path: String) -> Re
             return Err(e);
         }
         s.opened.lock().push(dir);
+        // Treat the copy like a download: Protected View in Office,
+        // SmartScreen checks, warnings before anything inside it runs.
+        if let Err(e) = browse::mark_from_internet(&out) {
+            st.db.log("open_from_vault", Some(&s.vault_id), "warning", Some(&format!("couldn't mark the copy as downloaded: {e}")));
+        }
         let a = fsutil::get_attrs(&out).unwrap_or(0) & fsutil::RESTORABLE_ATTRS;
         let _ = fsutil::set_attrs(&out, a | fsutil::FILE_ATTRIBUTE_READONLY);
         // The path is a single argument (no shell interpretation).

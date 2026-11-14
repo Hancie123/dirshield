@@ -1,12 +1,11 @@
 //! Pure decision logic, kept free of Tauri, the database and the environment so
-//! it can be unit tested: which folders may be locked, and what an Explorer
-//! prompt should do with the password it was given.
+//! it can be unit tested: which folders may be locked, and where vaults may be
+//! stored.
 
 use std::path::{Path, PathBuf};
 
 use crate::domain::error::{invalid, Error, Result};
 use crate::platform::fsutil::{self, is_same_or_inside};
-use crate::domain::model::KeyMode;
 
 // ---------------------------------------------------------------------------
 // Lock targets
@@ -106,55 +105,35 @@ pub fn check_target(p: &Path, ctx: &TargetContext) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Explorer prompt
-// ---------------------------------------------------------------------------
-
-/// Which password the prompt must check.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptCheck {
-    Master,
-    FolderPassword,
-}
-
-/// What `prompt_submit` should do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptPlan {
-    /// Quick Lock the folder (master password).
-    Lock { hide: bool },
-    /// Remove the Quick Lock.
-    Unlock(PromptCheck),
-    /// Make it visible again; it stays locked.
-    Unhide(PromptCheck),
-}
-
-/// `action` comes from the Explorer menu; `quick` is the folder's Quick Lock
-/// key mode if DirShield has a record for it.
-pub fn plan_prompt(action: &str, quick: Option<KeyMode>) -> Result<PromptPlan> {
-    let check = |k: KeyMode| match k {
-        KeyMode::Master => PromptCheck::Master,
-        KeyMode::Password => PromptCheck::FolderPassword,
-    };
-    match (action, quick) {
-        ("lock" | "quick-lock", Some(_)) => invalid("This folder is already locked."),
-        ("lock", None) => Ok(PromptPlan::Lock { hide: false }),
-        ("quick-lock", None) => Ok(PromptPlan::Lock { hide: true }),
-        ("unlock" | "unhide", None) => Err(Error::NotFound("Quick Lock record for this folder".into())),
-        ("unlock", Some(k)) => Ok(PromptPlan::Unlock(check(k))),
-        ("unhide", Some(k)) => Ok(PromptPlan::Unhide(check(k))),
-        _ => invalid("This action needs the DirShield window."),
+/// Where new vaults may be stored by default (the Settings vault location).
+/// `p` must already be normalised. It may not be a system folder, and it may
+/// not be inside a protected folder (or one restored from a vault): vault data
+/// written there would be swept into that folder when it is next locked.
+pub fn check_vault_root(p: &Path, ctx: &TargetContext) -> Result<()> {
+    if p.parent().is_none() || p.parent() == Some(Path::new("")) {
+        return invalid("Choose a folder for the vault location, not a whole drive.");
     }
-}
-
-/// Where an unlocked Quick Lock folder goes back to. The original location is
-/// encrypted metadata, so without the master key (folder-password unlock while
-/// DirShield is signed out) it's only known for folders locked in place.
-pub fn quick_restore_target(original_with_key: Option<PathBuf>, moved: bool, current: &Path) -> Result<PathBuf> {
-    match original_with_key {
-        Some(p) => Ok(p),
-        None if !moved => Ok(current.to_path_buf()),
-        None => invalid("Sign in to DirShield to restore this folder."),
+    for sys in &ctx.system_dirs {
+        if is_same_or_inside(p, sys) {
+            return invalid("Vaults can't be stored in system or program folders.");
+        }
     }
+    if let Some(dir) = &ctx.exe_dir {
+        if is_same_or_inside(p, dir) {
+            return invalid("Vaults can't be stored in the DirShield application folder.");
+        }
+    }
+    for v in &ctx.protected {
+        if is_same_or_inside(p, &v.original) {
+            return Err(Error::Conflict(format!("The vault location can't be inside \"{}\", which is protected by DirShield.", v.name)));
+        }
+        if let Some(vd) = &v.vault_dir {
+            if is_same_or_inside(p, vd) {
+                return invalid("The vault location can't be inside another vault.");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -261,27 +240,18 @@ mod tests {
     }
 
     #[test]
-    fn prompt_plans() {
-        use PromptCheck::*;
-        assert_eq!(plan_prompt("lock", None).unwrap(), PromptPlan::Lock { hide: false });
-        assert_eq!(plan_prompt("quick-lock", None).unwrap(), PromptPlan::Lock { hide: true });
-        assert!(plan_prompt("lock", Some(KeyMode::Master)).is_err());
-        assert!(plan_prompt("quick-lock", Some(KeyMode::Password)).is_err());
-        assert!(matches!(plan_prompt("unlock", None), Err(Error::NotFound(_))));
-        assert_eq!(plan_prompt("unlock", Some(KeyMode::Master)).unwrap(), PromptPlan::Unlock(Master));
-        assert_eq!(plan_prompt("unlock", Some(KeyMode::Password)).unwrap(), PromptPlan::Unlock(FolderPassword));
-        assert_eq!(plan_prompt("unhide", Some(KeyMode::Password)).unwrap(), PromptPlan::Unhide(FolderPassword));
-        // Secure Lock actions and anything unknown go to the main window
-        for a in ["secure-lock", "restore", "", "LOCK"] {
-            assert!(matches!(plan_prompt(a, None), Err(Error::Invalid(_))), "{a}");
+    fn vault_root_rules() {
+        let c = ctx();
+        for p in [root().join("Vaults"), root().join("Vaults2"), me().join("Documents").join("Vaults"), c.data_dir.join("Vaults")] {
+            check_vault_root(&p, &c).unwrap_or_else(|e| panic!("{} rejected: {e}", p.display()));
         }
-    }
-
-    #[test]
-    fn quick_restore_needs_key_for_moved_folders() {
-        let cur = root().join("Store").join("x");
-        assert_eq!(quick_restore_target(Some(root().join("orig")), true, &cur).unwrap(), root().join("orig"));
-        assert_eq!(quick_restore_target(None, false, &cur).unwrap(), cur);
-        assert!(quick_restore_target(None, true, &cur).is_err());
+        assert!(check_vault_root(&root(), &c).is_err());
+        assert!(check_vault_root(&root().join("Windows").join("x"), &c).is_err());
+        // a folder that merely contains a protected one is fine
+        check_vault_root(&root().join("Data"), &c).unwrap();
+        for p in [me().join("Documents").join("Taxes"), me().join("Documents").join("Taxes").join("v"), root().join("Data").join("Photos").join("v")] {
+            assert!(matches!(check_vault_root(&p, &c), Err(Error::Conflict(_))), "{} should conflict", p.display());
+        }
+        assert!(check_vault_root(&root().join("Vaults").join("v1").join("x"), &c).unwrap_err().to_string().contains("another vault"));
     }
 }

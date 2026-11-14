@@ -18,7 +18,7 @@ import {
 import logo from "../../src-tauri/icons/32x32.png";
 import { api } from "@/api";
 import { useStore, type Page } from "@/app/store";
-import { FluentButton, FluentNavigation, FluentSpinner, FluentTooltip, type NavItem } from "@/components/fluent";
+import { FluentButton, FluentNavigation, FluentSkeleton, FluentTooltip, type NavItem } from "@/components/fluent";
 import { AboutPage } from "@/features/about/AboutPage";
 import { ActivityPage } from "@/features/activity/ActivityPage";
 import { LoginPage } from "@/features/auth/LoginPage";
@@ -28,6 +28,7 @@ import { ChangeFolderPasswordDialog } from "@/features/folders/dialogs/ChangeFol
 import { DeleteVaultDialog } from "@/features/folders/dialogs/DeleteVaultDialog";
 import { DetailsDialog } from "@/features/folders/dialogs/DetailsDialog";
 import { LockDialog } from "@/features/folders/dialogs/LockDialog";
+import { RecoverWorkDialog } from "@/features/folders/dialogs/RecoverWorkDialog";
 import { RemoveOriginalsDialog } from "@/features/folders/dialogs/RemoveOriginalsDialog";
 import { UnlockDialog } from "@/features/folders/dialogs/UnlockDialog";
 import { VerifyDialog } from "@/features/folders/dialogs/VerifyDialog";
@@ -68,6 +69,8 @@ function DialogHost() {
       return <DeleteVaultDialog vault={dialog.vault} />;
     case "verify":
       return <VerifyDialog vault={dialog.vault} />;
+    case "recoverWork":
+      return <RecoverWorkDialog vault={dialog.vault} />;
     case "visibility":
       return <VisibilityDialog vault={dialog.vault} hidden={dialog.hidden} />;
     case "resume":
@@ -83,10 +86,18 @@ export default function App() {
   const { info, unlocked, page, setPage, ops, setUnlocked, dragging } = useStore();
   useAutoUpdateCheck();
 
+  // Startup: whether this is setup, sign-in or the app isn't known yet; the
+  // window is still the small sign-in size, so sketch that card.
   if (!info)
     return (
-      <div className="h-full flex items-center justify-center">
-        <FluentSpinner size={28} />
+      <div className="h-full flex items-center justify-center p-8" role="status" aria-label="Loading" aria-busy="true">
+        <div className="w-full max-w-[340px] flex flex-col items-center gap-3">
+          <FluentSkeleton width={48} height={48} round />
+          <FluentSkeleton width="55%" height={20} className="mt-2" />
+          <FluentSkeleton width="80%" />
+          <FluentSkeleton height={32} className="mt-4" />
+          <FluentSkeleton width={120} height={32} className="mt-1" />
+        </div>
       </div>
     );
   if (!info.initialized) return <SetupPage />;

@@ -144,3 +144,62 @@ fn visible_lock_shows_icon_and_restores_existing_desktop_ini() {
     assert_eq!(fsutil::get_attrs(&folder).unwrap() & fsutil::RESTORABLE_ATTRS, before);
     assert_eq!(fs::read(folder.join("sub").join("secret.txt")).unwrap(), b"secret");
 }
+
+/// What the background check relies on: a lock removed outside DirShield
+/// (here the way `icacls <folder> /remove:d *S-1-1-0` does it) is detected
+/// and can be put back without a password.
+#[test]
+fn removed_lock_is_detected_and_reapplied() {
+    let t = tempfile::tempdir().unwrap();
+    let folder = t.path().join("Tampered");
+    make(&folder);
+    let st = quicklock::lock(&folder, None, "tamp1", false, None).unwrap();
+    assert!(acl::is_restricted(&folder).unwrap());
+
+    let out = std::process::Command::new("icacls").arg(&folder).args(["/remove:d", "*S-1-1-0"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(!acl::is_restricted(&folder).unwrap());
+    assert_eq!(fs::read(folder.join("sub").join("secret.txt")).unwrap(), b"secret");
+
+    acl::apply_deny(&folder).unwrap();
+    assert!(acl::is_restricted(&folder).unwrap());
+    assert!(fs::read(folder.join("sub").join("secret.txt")).is_err());
+
+    quicklock::unlock(&st, &folder, None).unwrap();
+    assert_eq!(fs::read(folder.join("sub").join("secret.txt")).unwrap(), b"secret");
+}
+
+/// The deny ACE can't stop a rename by someone who may delete children of the
+/// parent folder; DirShield finds the folder again by its file id.
+#[test]
+fn renamed_locked_folder_is_found_again() {
+    let t = tempfile::tempdir().unwrap();
+    let folder = t.path().join("Renamable");
+    make(&folder);
+    let mut st = quicklock::lock(&folder, None, "ren1", false, None).unwrap();
+    assert!(st.file_id.is_some());
+    assert!(!quicklock::relocate(&mut st), "nothing moved yet");
+
+    let renamed = t.path().join("Renamed");
+    fs::rename(&folder, &renamed).expect("Windows allows renaming a Quick-Locked folder");
+    assert!(quicklock::relocate(&mut st));
+    assert_eq!(fsutil::path_key(std::path::Path::new(&st.current_path)), fsutil::path_key(&fsutil::normalize(&renamed).unwrap()));
+    assert!(acl::is_restricted(&renamed).unwrap());
+
+    let back = quicklock::unlock(&st, &folder, None).unwrap();
+    assert_eq!(fsutil::path_key(&back), fsutil::path_key(std::path::Path::new(&st.current_path)));
+    assert_eq!(fs::read(renamed.join("sub").join("secret.txt")).unwrap(), b"secret");
+}
+
+/// Locks recorded before file ids existed get one on their first check.
+#[test]
+fn old_locks_get_a_file_id() {
+    let t = tempfile::tempdir().unwrap();
+    let folder = t.path().join("Old");
+    make(&folder);
+    let mut st = quicklock::lock(&folder, None, "old1", false, None).unwrap();
+    st.file_id = None;
+    assert!(quicklock::relocate(&mut st));
+    assert!(st.file_id.is_some());
+    quicklock::unlock(&st, &folder, None).unwrap();
+}

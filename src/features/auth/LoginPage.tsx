@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { FingerprintRegular } from "@fluentui/react-icons";
 import logo from "../../../src-tauri/icons/128x128.png";
 import { api, errCode, errMsg } from "@/api";
 import { useStore } from "@/app/store";
@@ -32,7 +33,8 @@ export function LoginPage() {
       setUnlocked(true);
       await refreshInfo();
     } catch (e) {
-      setError(errMsg(e));
+      // Closing the Windows Hello prompt isn't an error.
+      if (errCode(e) !== "cancelled") setError(errMsg(e));
       if (errCode(e) === "rate_limited" || errCode(e) === "auth_failed") {
         const i = await api.appInfo();
         setLockout(i.lockoutMs);
@@ -44,6 +46,7 @@ export function LoginPage() {
   };
 
   const locked = lockout > 0;
+  const hello = !!info?.hello && !!info?.helloAvailable;
 
   if (forgot)
     return (
@@ -73,7 +76,7 @@ export function LoginPage() {
       <div className="flex flex-col items-center text-center">
         <img src={logo} alt="" className="w-16 h-16" />
         <h1 className="t-subtitle font-display mt-4">DirShield is locked</h1>
-        <p className="mt-1 text-[var(--text-2)]">Enter your master password to continue.</p>
+        <p className="mt-1 text-[var(--text-2)]">{hello ? "Use Windows Hello or enter your master password to continue." : "Enter your master password to continue."}</p>
       </div>
       <form
         className="mt-6 flex flex-col gap-3"
@@ -87,6 +90,11 @@ export function LoginPage() {
         <FluentButton type="submit" variant="accent" disabled={!pw || busy || locked}>
           {busy ? "Signing in…" : "Sign in"}
         </FluentButton>
+        {hello && (
+          <FluentButton type="button" disabled={busy} onClick={() => handle(() => api.loginHello())}>
+            <FingerprintRegular fontSize={18} /> Sign in with Windows Hello
+          </FluentButton>
+        )}
         <button type="button" className="text-[13px] text-[var(--accent-text)] hover:underline mt-1" onClick={() => setForgot(true)}>
           Forgot your password? Use your recovery key
         </button>

@@ -41,6 +41,12 @@ export function vaultMenuItems(v: VaultInfo, open: (d: DialogState) => void, act
     items.push({ key: "wsend", label: "End work session (lock now)", icon: <LockClosedRegular />, disabled: busy, onClick: () => act(() => api.workSessionEnd(v.id), "Locking the folder again. The unlocked copy is removed once its changes are in the vault.") });
     items.push({ key: "wskeep", label: "Keep unlocked", icon: <KeepOpenRegular />, onClick: () => act(() => api.workSessionKeep(v.id), "The folder stays unlocked until you lock it again.") });
   }
+  if (v.relockPending) {
+    // Master-password folders need no password while signed in; others need theirs.
+    const relock = () => (v.keyMode === "master" && act ? act(() => api.workSessionRecover(v.id), "Locking the folder again. The unlocked copy is removed once its changes are in the vault.") : open({ kind: "recoverWork", vault: v }));
+    items.push({ key: "wsrecover", label: "Lock again now", icon: <LockClosedRegular />, disabled: busy, onClick: relock });
+    if (act) items.push({ key: "wskeep", label: "Keep unlocked", icon: <KeepOpenRegular />, onClick: () => act(() => api.workSessionKeep(v.id), "The folder stays unlocked until you lock it again.") });
+  }
   items.push({ key: "details", label: "Details", icon: <InfoRegular />, onClick: () => open({ kind: "details", vault: v }) });
   if (v.mode === "secure") {
     items.push({ key: "sep", separator: true });

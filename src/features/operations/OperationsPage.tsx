@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ArrowClockwiseRegular, DeleteRegular, DismissRegular, ErrorCircleRegular, PauseRegular, PlayRegular, SkipForwardTabRegular } from "@fluentui/react-icons";
 import { api, errMsg, type OperationInfo } from "@/api";
 import { useStore } from "@/app/store";
-import { Badge, FluentButton, FluentCard, FluentDialog, FluentProgressBar, InfoBar, SectionHeader, useNotify } from "@/components/fluent";
+import { Badge, FluentButton, FluentCard, FluentDialog, FluentProgressBar, FluentSkeleton, InfoBar, SectionHeader, useNotify } from "@/components/fluent";
 import { formatBytes, formatCount, formatDuration, opStatusLabel, opTone, opTypeLabel, relativeTime } from "@/lib/format";
 
 function OpCard({ o, onDiscard }: { o: OperationInfo; onDiscard: (o: OperationInfo) => void }) {
@@ -90,8 +90,22 @@ function OpCard({ o, onDiscard }: { o: OperationInfo; onDiscard: (o: OperationIn
   );
 }
 
+/** Placeholder for an operation card while the list loads. */
+function OpCardSkeleton() {
+  return (
+    <FluentCard className="px-5 py-4 flex flex-col gap-3">
+      <div className="flex items-center gap-3">
+        <FluentSkeleton width="40%" height={14} />
+        <FluentSkeleton width={72} height={18} className="ml-auto" />
+      </div>
+      <FluentSkeleton height={3} />
+      <FluentSkeleton width="55%" />
+    </FluentCard>
+  );
+}
+
 export function OperationsPage() {
-  const { ops, refresh } = useStore();
+  const { ops, loaded, refresh } = useStore();
   const notify = useNotify();
   const [discard, setDiscard] = useState<OperationInfo | null>(null);
   const active = ops.filter((o) => o.live);
@@ -106,7 +120,9 @@ export function OperationsPage() {
         </FluentButton>
       </div>
       <SectionHeader>Active</SectionHeader>
-      {active.length === 0 ? <div className="text-[var(--text-2)] px-1">Nothing is running right now.</div> : active.map((o) => <OpCard key={o.id} o={o} onDiscard={setDiscard} />)}
+      {!loaded ? (
+        <OpCardSkeleton />
+      ) : active.length === 0 ? <div className="text-[var(--text-2)] px-1">Nothing is running right now.</div> : active.map((o) => <OpCard key={o.id} o={o} onDiscard={setDiscard} />)}
       {attention.length > 0 && (
         <>
           <SectionHeader>Needs attention</SectionHeader>
@@ -117,7 +133,12 @@ export function OperationsPage() {
         </>
       )}
       <SectionHeader>Completed</SectionHeader>
-      {done.length === 0 ? <div className="text-[var(--text-2)] px-1">No completed operations.</div> : done.slice(0, 30).map((o) => <OpCard key={o.id} o={o} onDiscard={setDiscard} />)}
+      {!loaded ? (
+        <>
+          <OpCardSkeleton />
+          <OpCardSkeleton />
+        </>
+      ) : done.length === 0 ? <div className="text-[var(--text-2)] px-1">No completed operations.</div> : done.slice(0, 30).map((o) => <OpCard key={o.id} o={o} onDiscard={setDiscard} />)}
       {done.length > 0 && (
         <div>
           <FluentButton variant="subtle" onClick={() => api.clearFinishedOperations().then(refresh)}>

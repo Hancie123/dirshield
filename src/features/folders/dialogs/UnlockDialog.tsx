@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, errCode, errMsg, type ConflictPolicy, type Credential, type OperationInfo, type VaultInfo } from "@/api";
 import { useStore } from "@/app/store";
-import { CredentialFields, defaultKind } from "@/components/CredentialFields";
+import { CredentialFields, credReady, defaultKind } from "@/components/CredentialFields";
 import { KeyValue } from "@/components/KeyValue";
 import { OperationProgress } from "@/components/OperationProgress";
 import { FluentButton, FluentCheckbox, FluentDialog, FluentRadio, InfoBar, useNotify } from "@/components/fluent";
@@ -62,7 +62,7 @@ export function UnlockDialog({ vault, recovery }: { vault: VaultInfo; recovery?:
       <FluentButton onClick={closeDialog}>Close</FluentButton>
     ) : (
       <>
-        <FluentButton variant="accent" disabled={!cred.secret || busy} onClick={submit}>
+        <FluentButton variant="accent" disabled={!credReady(cred) || busy} onClick={submit}>
           {busy ? "Working…" : quick ? "Unlock" : "Restore folder"}
         </FluentButton>
         <FluentButton disabled={busy} onClick={closeDialog}>
@@ -106,16 +106,26 @@ export function UnlockDialog({ vault, recovery }: { vault: VaultInfo; recovery?:
               onChange={setConflict}
               options={[
                 { value: "fail", label: "Stop (choose another location)" },
-                { value: "skip", label: "Keep the existing file and skip the vault copy" },
+                // A work session locks everything in the folder when it ends,
+                // so it can't restore into a folder that already has files.
+                ...(work ? [] : [{ value: "skip" as const, label: "Keep the existing file and skip the vault copy" }]),
                 { value: "rename", label: "Keep both — restored copy is renamed “(restored)”" },
               ]}
             />
           )}
           {!quick && (
-            <FluentCheckbox checked={work} onChange={setWork}>
+            <FluentCheckbox
+              checked={work}
+              onChange={(w) => {
+                setWork(w);
+                if (w && conflict === "skip") setConflict("fail");
+              }}
+            >
               <span>
                 Work session — lock it again automatically when I sign out of DirShield or Windows locks or sleeps
-                <span className="block t-caption text-[var(--text-2)]">Changes are encrypted into the vault, then the unlocked copy is removed. Files that couldn't be saved to the vault are kept.</span>
+                <span className="block t-caption text-[var(--text-2)]">
+                  Changes are encrypted into the vault, then the unlocked copy is removed. Files that couldn't be saved to the vault are kept. Needs a new or empty destination folder, since everything in it is locked when the session ends.
+                </span>
               </span>
             </FluentCheckbox>
           )}

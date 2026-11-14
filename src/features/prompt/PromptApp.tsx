@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { CheckmarkCircleFilled, DeleteRegular, EyeRegular, LockClosedRegular, LockOpenRegular, EyeOffRegular, SettingsRegular, ShieldLockRegular } from "@fluentui/react-icons";
-import { api, errMsg, type PromptInfo } from "@/api";
+import { CheckmarkCircleFilled, DeleteRegular, FingerprintRegular, EyeRegular, LockClosedRegular, LockOpenRegular, EyeOffRegular, SettingsRegular, ShieldLockRegular } from "@fluentui/react-icons";
+import { api, errCode, errMsg, type PromptInfo } from "@/api";
 import { applyTheme } from "@/app/store";
 import { FluentButton, FluentPasswordInput, FluentSpinner, InfoBar } from "@/components/fluent";
 
@@ -21,13 +21,15 @@ const TEXT: Record<string, { title: string; button: string; busy: string; icon: 
 };
 
 /**
- * Actions this window signs in for and then continues in DirShield: Secure
- * Lock and Settings, and unlock/unhide of a folder that isn't Quick-Locked
- * (a Secure Lock folder is restored in the app).
+ * Actions this window signs in for and then continues in DirShield (decided
+ * by the backend, `PromptInfo.handoff`): Secure Lock and Settings,
+ * unlock/unhide of a folder that isn't Quick-Locked (a Secure Lock folder is
+ * restored in the app), and unlocking a moved folder with its own password
+ * while DirShield is signed out (only the app knows where it came from).
  */
-function isHandoff(p: PromptInfo): boolean {
-  if (p.action === "secure-lock" || p.action === "settings") return true;
-  return (p.action === "unlock" || p.action === "unhide") && !p.vault;
+function handoffNote(p: PromptInfo): string {
+  if (p.action === "unlock" && p.vault?.moved) return "This folder was moved for locking. Enter your master password to continue in DirShield, where you choose where to restore it and enter the folder password.";
+  return HANDOFF_NOTE[p.action] ?? "";
 }
 
 const HANDOFF_NOTE: Record<string, string> = {
@@ -85,15 +87,16 @@ export function PromptApp() {
     };
   }, [load]);
 
-  const submit = async () => {
-    if (!password || busy) return;
+  const submit = async (useHello = false) => {
+    if ((!password && !useHello) || busy) return;
     setBusy(true);
     setError(null);
     try {
-      setDone(await api.promptSubmit(password));
+      setDone(await api.promptSubmit(useHello ? "" : password, useHello));
       setTimeout(() => api.promptClose(), 1400);
     } catch (e) {
-      setError(errMsg(e));
+      // Closing the Windows Hello prompt isn't an error.
+      if (errCode(e) !== "cancelled") setError(errMsg(e));
       setTimeout(() => input.current?.select(), 0);
     } finally {
       setPassword("");
@@ -103,10 +106,11 @@ export function PromptApp() {
 
   const t = TEXT[info?.action ?? "lock"] ?? TEXT.lock;
   const block = info ? blocker(info) : null;
-  const handoff = !!info && isHandoff(info);
+  const handoff = !!info?.handoff;
   const button = handoff ? "Continue" : t.button;
   const busyText = handoff ? "Signing in…" : t.busy;
-  const folderPw = info?.vault?.keyMode === "password" && (info.action === "unlock" || info.action === "unhide");
+  const folderPw = !handoff && info?.vault?.keyMode === "password" && (info.action === "unlock" || info.action === "unhide");
+  const hello = !!info?.hello && !folderPw && info.action !== "uninstall";
 
   return (
     <div className="h-full flex flex-col p-6 gap-4 anim-page">
@@ -127,7 +131,7 @@ export function PromptApp() {
               </div>
             </div>
           )}
-          {handoff && !block && <div className="t-caption text-[var(--text-2)]">{HANDOFF_NOTE[info.action]}</div>}
+          {handoff && !block && <div className="t-caption text-[var(--text-2)]">{handoffNote(info)}</div>}
         </div>
       )}
 
@@ -158,7 +162,12 @@ export function PromptApp() {
           <FluentButton onClick={() => api.promptClose()}>Close</FluentButton>
         ) : (
           <>
-            <FluentButton variant="accent" disabled={!password || busy || !info} onClick={submit}>
+            {hello && (
+              <FluentButton disabled={busy} onClick={() => submit(true)} title="Use Windows Hello instead of the master password">
+                <FingerprintRegular fontSize={18} /> Windows Hello
+              </FluentButton>
+            )}
+            <FluentButton variant="accent" disabled={!password || busy || !info} onClick={() => submit()}>
               {busy ? (
                 <span className="flex items-center gap-2">
                   <FluentSpinner size={14} /> {busyText}

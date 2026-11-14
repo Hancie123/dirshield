@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ColorRegular, FolderOpenRegular, KeyRegular, ArrowSyncRegular, PlayCircleRegular, TimerRegular, WindowRegular, LockShieldRegular, KeyResetRegular, GlobeRegular, SaveRegular, HistoryRegular, ShieldCheckmarkRegular } from "@fluentui/react-icons";
+import { ColorRegular, FolderOpenRegular, KeyRegular, ArrowSyncRegular, PlayCircleRegular, TimerRegular, WindowRegular, LockShieldRegular, KeyResetRegular, FingerprintRegular, GlobeRegular, SaveRegular, HistoryRegular, ShieldCheckmarkRegular } from "@fluentui/react-icons";
 import { api, errMsg, type Settings } from "@/api";
 import { setThemePreference, useStore } from "@/app/store";
 import { FluentButton, FluentDialog, FluentSelect, FluentToggle, SectionHeader, SettingsRow, useNotify } from "@/components/fluent";
@@ -8,6 +8,7 @@ import { NewRecoveryKeyDialog } from "@/features/recovery/components/NewRecovery
 import { PortableVaultsDialog } from "@/features/recovery/components/PortableVaultsDialog";
 import { RestoreBackupForm } from "@/features/recovery/components/RestoreBackupForm";
 import { ChangeMasterDialog } from "@/features/settings/ChangeMasterDialog";
+import { HelloDialog } from "@/features/settings/HelloDialog";
 import { formatDate } from "@/lib/format";
 
 export function SettingsPage() {
@@ -19,6 +20,8 @@ export function SettingsPage() {
   const [portable, setPortable] = useState<boolean | null>(null);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
+  const [helloOpen, setHelloOpen] = useState(false);
+  const [helloBusy, setHelloBusy] = useState(false);
   const { refresh, refreshInfo } = useStore();
   useEffect(() => {
     api.getSettings().then(setS).catch((e) => notify({ severity: "error", title: "Couldn't load settings", message: errMsg(e) }));
@@ -56,6 +59,30 @@ export function SettingsPage() {
       <SectionHeader>Security</SectionHeader>
       <SettingsRow icon={<KeyRegular />} title="Master password">
         <FluentButton onClick={() => setPwOpen(true)}>Change</FluentButton>
+      </SettingsRow>
+      <SettingsRow
+        icon={<FingerprintRegular />}
+        title="Windows Hello"
+        description={info?.helloAvailable ? "Use your fingerprint, face or PIN instead of the master password" : "Set up a PIN, fingerprint or face in Windows Settings > Accounts > Sign-in options to use this"}
+      >
+        <FluentToggle
+          label="Windows Hello"
+          checked={!!info?.hello}
+          disabled={helloBusy || (!info?.helloAvailable && !info?.hello)}
+          onChange={async (on) => {
+            if (on) return setHelloOpen(true);
+            setHelloBusy(true);
+            try {
+              await api.helloDisable();
+              notify({ severity: "success", title: "Windows Hello turned off" });
+            } catch (e) {
+              notify({ severity: "error", title: "Couldn't turn off Windows Hello", message: errMsg(e) });
+            } finally {
+              await refreshInfo();
+              setHelloBusy(false);
+            }
+          }}
+        />
       </SettingsRow>
       <SettingsRow icon={<TimerRegular />} title="Lock DirShield after inactivity">
         <FluentSelect
@@ -154,6 +181,16 @@ export function SettingsPage() {
       </SettingsRow>
       {pwOpen && <ChangeMasterDialog onClose={() => setPwOpen(false)} />}
       {rkOpen && <NewRecoveryKeyDialog onClose={() => setRkOpen(false)} />}
+      {helloOpen && (
+        <HelloDialog
+          onClose={() => setHelloOpen(false)}
+          onDone={async () => {
+            setHelloOpen(false);
+            notify({ severity: "success", title: "Windows Hello turned on" });
+            await refreshInfo();
+          }}
+        />
+      )}
       {portable != null && (
         <PortableVaultsDialog
           enable={portable}

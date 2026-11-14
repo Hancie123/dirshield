@@ -172,6 +172,14 @@ select,
 @keyframes fl-page-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes fl-indeterminate { 0% { left: -40%; } 100% { left: 100%; } }
 @keyframes fl-spin { to { transform: rotate(360deg); } }
+@keyframes fl-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+/* Loading placeholder: a soft band sweeps across the block. */
+.fl-skeleton {
+  background: linear-gradient(90deg, var(--fill-subtle-hover) 0%, var(--fill-subtle-hover) 35%, var(--stroke-divider) 50%, var(--fill-subtle-hover) 65%, var(--fill-subtle-hover) 100%);
+  background-size: 200% 100%;
+  animation: fl-shimmer 1.4s linear infinite;
+}
 
 .anim-fade { animation: fl-fade-in 0.167s ease-out; }
 .anim-dialog { animation: fl-dialog-in 0.167s cubic-bezier(0, 0, 0, 1); }
@@ -179,5 +187,5 @@ select,
 .anim-page { animation: fl-page-in 0.25s cubic-bezier(0, 0, 0, 1); }
 
 @media (prefers-reduced-motion: reduce) {
-  .anim-fade, .anim-dialog, .anim-flyout, .anim-page { animation: none; }
+  .anim-fade, .anim-dialog, .anim-flyout, .anim-page, .fl-skeleton { animation: none; }
 }

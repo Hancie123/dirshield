@@ -224,54 +224,49 @@ impl VaultIndex {
     }
 }
 
-/// Extensions that run code when "opened". Those files can be extracted, but
+/// Extensions that run code, mount content or carry active content (macros,
+/// script in web pages) when "opened". Those files can be extracted, but
 /// DirShield won't launch them straight out of a vault.
 pub fn is_executable(name: &str) -> bool {
     const EXT: &[&str] = &[
-        "exe",
-        "com",
-        "bat",
-        "cmd",
-        "scr",
-        "pif",
-        "msi",
-        "msp",
-        "msix",
-        "appx",
-        "ps1",
-        "psm1",
-        "vbs",
-        "vbe",
-        "js",
-        "jse",
-        "wsf",
-        "wsh",
-        "hta",
-        "cpl",
-        "lnk",
-        "url",
-        "reg",
-        "jar",
-        "dll",
-        "sys",
-        "inf",
-        "application",
-        "gadget",
-        "scf",
-        "chm",
-        "library-ms",
-        "settingcontent-ms",
+        // Programs, installers and scripts
+        "exe", "com", "bat", "cmd", "scr", "pif", "msi", "msp", "msix", "msixbundle", "appx", "appxbundle", "appinstaller", "ps1", "psm1", "psd1", "ps1xml", "psc1", "vb", "vbs", "vbe", "js", "jse",
+        "wsf", "wsh", "wsc", "sct", "hta", "cpl", "msc", "jar", "dll", "sys", "drv", "ocx", "inf", "reg", "xll", "application", "appref-ms", "xbap", "vsto", "gadget", "diagcab",
+        // Shortcuts and shell files that point at or run something else
+        "lnk", "url", "scf", "library-ms", "settingcontent-ms", "search-ms", "searchconnector-ms",
+        // Disk images: opening one mounts it and shows whatever is inside
+        "iso", "img", "vhd", "vhdx",
+        // Office files with macros, add-ins, OneNote
+        "docm", "dotm", "xlsm", "xltm", "xlam", "xla", "pptm", "potm", "ppsm", "ppam", "sldm", "one", "onepkg",
+        // Web pages and active documents (script runs in the viewer)
+        "htm", "html", "xht", "xhtml", "mht", "mhtml", "svg", "svgz", "chm",
     ];
-    let lower = name.to_lowercase();
+    let lower = name.trim_end_matches(['.', ' ']).to_lowercase();
     lower.rsplit_once('.').map(|(_, e)| EXT.contains(&e)).unwrap_or(false)
+}
+
+/// Marks a file as downloaded from the internet (Mark of the Web: a
+/// `Zone.Identifier` stream with ZoneId=3). Office then opens it in Protected
+/// View, SmartScreen and attachment checks apply, and Windows warns before
+/// running anything inside it. Best effort: needs NTFS.
+pub fn mark_from_internet(file: &Path) -> Result<()> {
+    let mut ads = file.as_os_str().to_owned();
+    ads.push(":Zone.Identifier");
+    let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).open(PathBuf::from(ads))?;
+    f.write_all(b"[ZoneTransfer]
+ZoneId=3
+")?;
+    Ok(())
 }
 
 /// Overwrites every file below `dir` with zeros, then deletes the tree.
 /// Best effort: files still open in another program are left for a later
 /// attempt. Returns true if `dir` is gone.
 ///
-/// Note: like any deletion on SSDs and journaling file systems, this can't
-/// guarantee the old blocks are physically unrecoverable.
+/// This is NOT secure erasure. On SSDs (wear levelling, TRIM), on
+/// copy-on-write or journaling file systems and with Volume Shadow Copies or
+/// file history, the old data can remain on the device. It only stops the
+/// copy from being opened normally. See `WIPE_CAVEAT` for the user-facing text.
 pub fn wipe_tree(dir: &Path) -> bool {
     if !dir.exists() {
         return true;
@@ -301,6 +296,9 @@ pub fn wipe_tree(dir: &Path) -> bool {
     !dir.exists()
 }
 
+/// Shown wherever opened copies are mentioned to the user.
+pub const WIPE_CAVEAT: &str = "Opening a file puts a decrypted copy on disk. DirShield overwrites and deletes it when you close the vault, but on SSDs the old data can remain on the drive. To keep a file from ever touching the disk unencrypted, don't open it from the vault.";
+
 /// Wipes every leftover folder under DirShield's temp directory.
 pub fn wipe_all(temp_root: &Path) {
     if let Ok(rd) = fs::read_dir(temp_root) {
@@ -324,12 +322,26 @@ mod tests {
 
     #[test]
     fn executable_detection() {
-        for n in ["setup.EXE", "a.b.ps1", "x.lnk", "run.cmd"] {
+        for n in ["setup.EXE", "a.b.ps1", "x.lnk", "run.cmd", "console.msc", "app.appref-ms", "disk.iso", "d.vhdx", "budget.xlsm", "page.HTML", "pic.svg", "a.mht", "add.xll", "s.sct", "nb.one", "trick.exe.", "trick.exe "] {
             assert!(is_executable(n), "{n}");
         }
         for n in ["report.pdf", "photo.jpg", "notes", "archive.tar.gz", "exe"] {
             assert!(!is_executable(n), "{n}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mark_from_internet_writes_zone_identifier() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("report.docx");
+        fs::write(&f, b"data").unwrap();
+        mark_from_internet(&f).unwrap();
+        let mut ads = f.as_os_str().to_owned();
+        ads.push(":Zone.Identifier");
+        let zone = fs::read_to_string(PathBuf::from(ads)).unwrap();
+        assert!(zone.contains("ZoneId=3"), "{zone}");
+        assert_eq!(fs::read(&f).unwrap(), b"data");
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ChevronDownRegular, FolderOpenRegular, FolderRegular, FlashRegular, ShieldLockRegular } from "@fluentui/react-icons";
 import { api, errMsg, type OperationInfo, type ScanReport } from "@/api";
 import { useStore } from "@/app/store";
+import { HelloNote, useHelloEnabled } from "@/components/CredentialFields";
 import { OperationProgress } from "@/components/OperationProgress";
 import { StrengthHint } from "@/components/PasswordStrength";
 import { FluentButton, FluentCheckbox, FluentDialog, FluentPasswordInput, FluentRadio, FluentSegmented, FluentSpinner, InfoBar, useNotify } from "@/components/fluent";
@@ -20,6 +21,8 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
   const [scan, setScan] = useState<ScanReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [password, setPassword] = useState("");
+  const helloOn = useHelloEnabled();
+  const [useHello, setUseHello] = useState(false);
   const [useFolderPw, setUseFolderPw] = useState<"master" | "password">("master");
   const [folderPw, setFolderPw] = useState("");
   const [folderPw2, setFolderPw2] = useState("");
@@ -63,7 +66,7 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
   };
 
   const pwMismatch = useFolderPw === "password" && folderPw2.length > 0 && folderPw !== folderPw2;
-  const pwOk = password.length > 0 && (useFolderPw === "master" || (folderPw.length >= 8 && folderPw === folderPw2));
+  const pwOk = (useHello || password.length > 0) && (useFolderPw === "master" || (folderPw.length >= 8 && folderPw === folderPw2));
   const spaceOk = mode === "quick" || vaultFree == null || !scan || vaultFree >= scan.estimatedVaultBytes;
   const canConfirm = step === "confirm" && pwOk && spaceOk && (mode === "quick" || understood);
 
@@ -72,13 +75,14 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
     setStep("working");
     try {
       const fp = useFolderPw === "password" ? folderPw : null;
+      const cred = useHello ? ({ kind: "hello", secret: "" } as const) : ({ kind: "master", secret: password } as const);
       if (mode === "quick") {
-        const v = await api.quickLock(path, password, fp, hide);
+        const v = await api.quickLock(path, cred, fp, hide);
         notify({ severity: "success", title: "Folder locked", message: hide ? `“${v.name}” is now hidden and access-restricted.` : `“${v.name}” is now access-restricted. It stays visible where it is.` });
         await refresh();
         closeDialog();
       } else {
-        const id = await api.secureLock(path, password, fp, vaultRoot || null);
+        const id = await api.secureLock(path, cred, fp, vaultRoot || null);
         setOpId(id);
         setStep("progress");
       }
@@ -160,7 +164,12 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
                   </div>
                 </div>
               </div>
-              {mode === "quick" && <p className="t-caption text-[var(--text-2)] -mt-2">Quick Lock blocks access but doesn't encrypt. Use Secure Lock for sensitive data.</p>}
+              {mode === "quick" && (
+                <InfoBar severity="warning" title="Quick Lock keeps people out. Secure Lock keeps data safe.">
+                  Quick Lock only blocks access; it doesn't encrypt. Any program running under your Windows account, including malware, can remove it without your password, and an administrator or
+                  another operating system can read the files. DirShield checks every minute and locks the folder again if it was removed. For anything sensitive, use Secure Lock.
+                </InfoBar>
+              )}
               {scan.links > 0 && (
                 <InfoBar severity="warning" title={`${formatCount(scan.links)} link(s) or junction(s) will be skipped.`}>
                   They are not followed and stay where they are.
@@ -177,7 +186,18 @@ export function LockDialog({ initialMode, initialPath, initialHide = true }: { i
                   Needs about {formatBytes(scan.estimatedVaultBytes)}; {vaultFree != null ? formatBytes(vaultFree) : "less"} free. Choose another vault location under More options.
                 </InfoBar>
               )}
-              <FluentPasswordInput label="Master password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && canConfirm && submit()} />
+              {useHello ? (
+                <HelloNote onUsePassword={() => setUseHello(false)} />
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <FluentPasswordInput label="Master password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && canConfirm && submit()} />
+                  {helloOn && (
+                    <button type="button" className="self-start text-[13px] text-[var(--accent-text)] hover:underline" onClick={() => setUseHello(true)}>
+                      Use Windows Hello instead
+                    </button>
+                  )}
+                </div>
+              )}
               {mode === "secure" && (
                 <FluentCheckbox checked={understood} onChange={setUnderstood}>
                   I understand encrypted data can't be recovered without my password or recovery key.

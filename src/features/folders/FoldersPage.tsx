@@ -7,7 +7,7 @@ import { vaultMenuItems, type MenuAct } from "@/features/folders/vaultMenu";
 import { formatBytes, formatCount, formatDate, vaultStatusLabel, vaultTone } from "@/lib/format";
 
 export function FoldersPage() {
-  const { vaults, openDialog, refresh } = useStore();
+  const { vaults, loaded, openDialog, refresh } = useStore();
   const notify = useNotify();
   const [selected, setSelected] = useState<string | null>(null);
   const act: MenuAct = (f, success) =>
@@ -23,7 +23,7 @@ export function FoldersPage() {
     {
       key: "name",
       header: "Name",
-      width: "minmax(160px,2fr)",
+      width: "minmax(140px,2fr)",
       render: (v) => (
         <div className="flex items-center gap-3 min-w-0">
           <span className="relative flex text-[22px] text-[#e8a22a]">
@@ -32,23 +32,29 @@ export function FoldersPage() {
           </span>
           <span className="truncate">{v.name}</span>
           {v.workSession && <Badge tone="caution">Work session</Badge>}
+          {v.relockPending && (
+            <FluentTooltip content="DirShield closed before this work session ended. The folder is still decrypted on disk: choose Lock again now.">
+              <Badge tone="critical">Left unlocked</Badge>
+            </FluentTooltip>
+          )}
         </div>
       ),
     },
-    { key: "mode", header: "Protection", width: "100px", render: (v) => <span className="whitespace-nowrap">{v.mode === "secure" ? "Secure Lock" : "Quick Lock"}</span> },
+    { key: "mode", header: "Protection", width: "100px", hideBelow: 680, render: (v) => <span className="whitespace-nowrap">{v.mode === "secure" ? "Secure Lock" : "Quick Lock"}</span> },
     {
       key: "loc",
       header: "Original location",
-      width: "minmax(120px,2fr)",
+      width: "minmax(100px,2fr)",
+      hideBelow: 470,
       render: (v) => (
         <FluentTooltip content={v.originalPath} className="flex min-w-0">
           <span className="truncate text-[var(--text-2)]">{v.originalPath}</span>
         </FluentTooltip>
       ),
     },
-    { key: "size", header: "Size", width: "80px", align: "right", render: (v) => <span className="tabular-nums whitespace-nowrap">{formatBytes(v.sizeBytes)}</span> },
-    { key: "files", header: "Files", width: "56px", align: "right", render: (v) => <span className="tabular-nums">{formatCount(v.fileCount)}</span> },
-    { key: "date", header: "Date locked", width: "160px", render: (v) => <span className="block truncate text-[var(--text-2)]">{formatDate(v.lockedAt ?? v.createdAt)}</span> },
+    { key: "size", header: "Size", width: "80px", align: "right", hideBelow: 570, render: (v) => <span className="tabular-nums whitespace-nowrap">{formatBytes(v.sizeBytes)}</span> },
+    { key: "files", header: "Files", width: "56px", align: "right", hideBelow: 910, render: (v) => <span className="tabular-nums">{formatCount(v.fileCount)}</span> },
+    { key: "date", header: "Date locked", width: "160px", hideBelow: 850, render: (v) => <span className="block truncate text-[var(--text-2)]">{formatDate(v.lockedAt ?? v.createdAt)}</span> },
     { key: "status", header: "Status", width: "minmax(120px,1fr)", render: (v) => <Badge tone={vaultTone(v.status)}>{vaultStatusLabel[v.status]}</Badge> },
     {
       key: "more",
@@ -104,8 +110,11 @@ export function FoldersPage() {
       <FluentTable
         columns={columns}
         rows={vaults}
+        loading={!loaded}
         rowKey={(v) => v.id}
-        minWidth={960}
+        // Columns drop out as the window narrows (see hideBelow) so the table
+        // fits the smallest window without scrolling sideways.
+        minWidth={360}
         selected={selected}
         onSelect={(v) => setSelected(v.id)}
         onOpen={(v) => openDialog({ kind: "details", vault: v })}

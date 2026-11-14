@@ -7,6 +7,7 @@ export * from "./FluentNavigation";
 export * from "./FluentNotification";
 export * from "./FluentPasswordInput";
 export * from "./FluentProgressBar";
+export * from "./FluentSkeleton";
 export * from "./FluentTable";
 export * from "./FluentToggle";
 export * from "./FluentTooltip";

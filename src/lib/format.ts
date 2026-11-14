@@ -135,7 +135,31 @@ const actionLabels: Record<string, string> = {
   backup_created: "Backup created",
   backup_restored: "Restored from backup",
   activity_cleared: "Activity history cleared",
+  activity_exported: "Activity exported",
+  quick_lock_reapplied: "Quick Lock put back",
+  quick_lock_moved: "Locked folder renamed or moved",
+  work_session_recovered: "Work session recovered",
 };
+/** Every known action label, keyed by action code. */
+export function actionLabelMap(): Record<string, string> {
+  return { ...actionLabels };
+}
+
+/** Activity results as shown to the user (keep in sync with `status_label` in commands/settings.rs). */
+const activityStatusLabels: Record<string, string> = {
+  success: "Succeeded",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  warning: "Warning",
+  info: "Info",
+};
+export function activityStatusLabel(s: string): string {
+  return activityStatusLabels[s] ?? s.charAt(0).toUpperCase() + s.slice(1);
+}
+export function activityTone(s: string): Tone {
+  return s === "success" ? "success" : s === "failed" ? "critical" : s === "cancelled" || s === "warning" ? "caution" : "neutral";
+}
+
 export function actionLabel(a: string): string {
   return actionLabels[a] ?? a.replace(/_/g, " ");
 }

@@ -13,6 +13,7 @@ use super::*;
 pub struct PromptVault {
     key_mode: String,
     hidden: bool,
+    moved: bool,
 }
 
 #[derive(Serialize)]
@@ -23,11 +24,36 @@ pub struct PromptInfo {
     name: String,
     /// The Quick Lock record for this folder, if it has one.
     vault: Option<PromptVault>,
+    /// The prompt only signs in (master password) and the action continues
+    /// in the main window.
+    handoff: bool,
+    /// Windows Hello can be used instead of the master password.
+    hello: bool,
+}
+
+/// Actions the prompt only signs in for, finishing them in the main window:
+/// Secure Lock and Settings; unlock/unhide of a folder that isn't
+/// Quick-Locked (Secure Lock folders are restored there); and unlocking a
+/// moved folder with its own password while DirShield is signed out. That
+/// folder's original location is encrypted metadata, so the main window,
+/// once signed in, asks where to put it back.
+fn is_handoff(st: &AppState, action: &str, quick: Option<&(VaultRow, QuickState)>) -> bool {
+    match action {
+        "secure-lock" | "settings" => true,
+        "unlock" => match quick {
+            None => true,
+            Some((r, q)) => r.key_mode == "password" && q.moved && !st.session.is_unlocked(),
+        },
+        "unhide" => quick.is_none(),
+        _ => false,
+    }
 }
 
 /// Quick-Locked folder at `path`. Its current location is stored in plain
 /// form, so no key is needed to find it.
 fn quick_row_at(st: &AppState, path: &str) -> Result<Option<(VaultRow, QuickState)>> {
+    // A locked folder renamed in Explorer is found under its new name.
+    sync_quick_locations(st, None);
     let key = fsutil::path_key(Path::new(path));
     for r in all_vaults(st)? {
         if r.mode != "quick" {
@@ -69,6 +95,7 @@ fn handoff_to_main(app: &AppHandle, st: &AppState, mk: Key32) {
     if let Some(w) = app.get_webview_window("prompt") {
         let _ = w.close();
     }
+    notify_relock_pending(app, st);
 }
 
 /// The prompt was opened by the uninstaller (`--confirm-uninstall`).
@@ -84,14 +111,18 @@ pub(super) fn folder_name(path: &str) -> String {
 pub async fn prompt_info(app: AppHandle) -> Result<PromptInfo> {
     run(&app, move |_, st| {
         if is_uninstall_prompt(st) {
-            return Ok(PromptInfo { action: "uninstall".into(), path: String::new(), name: "DirShield".into(), vault: None });
+            return Ok(PromptInfo { action: "uninstall".into(), path: String::new(), name: "DirShield".into(), vault: None, handoff: false, hello: false });
         }
+        let hello = hello::available() && hello::is_enabled(&st.db);
         let (action, path) = prompt_action(st)?;
         if path.is_empty() {
-            return Ok(PromptInfo { action, path, name: "DirShield".into(), vault: None });
+            let handoff = is_handoff(st, &action, None);
+            return Ok(PromptInfo { action, path, name: "DirShield".into(), vault: None, handoff, hello });
         }
-        let vault = quick_row_at(st, &path)?.map(|(r, q)| PromptVault { key_mode: r.key_mode, hidden: q.hidden });
-        Ok(PromptInfo { action, name: folder_name(&path), path, vault })
+        let quick = quick_row_at(st, &path)?;
+        let handoff = is_handoff(st, &action, quick.as_ref());
+        let vault = quick.map(|(r, q)| PromptVault { key_mode: r.key_mode, hidden: q.hidden, moved: q.moved });
+        Ok(PromptInfo { action, name: folder_name(&path), path, vault, handoff, hello })
     })
     .await
 }
@@ -114,13 +145,8 @@ pub async fn prompt_submit(app: AppHandle, password: String, use_hello: Option<b
         let name = folder_name(&path);
         // Actions finished in the main window: sign in here, continue there.
         let quick = if path.is_empty() { None } else { quick_row_at(st, &path)? };
-        let handoff = match action.as_str() {
-            "secure-lock" | "settings" => true,
-            "unlock" | "unhide" => quick.is_none(),
-            _ => false,
-        };
-        if handoff {
-            let mk = verify_master(st, &password)?;
+        if is_handoff(st, &action, quick.as_ref()) {
+            let mk = master(st)?;
             handoff_to_main(app, st, mk);
             return Ok("Opening DirShield…".into());
         }
@@ -153,7 +179,12 @@ pub async fn prompt_submit(app: AppHandle, password: String, use_hello: Option<b
                 let original = match &mk {
                     Some(mk) => PathBuf::from(info(st, mk, &r).original_path),
                     None if !q.moved => PathBuf::from(&q.current_path),
-                    None => return invalid("Sign in to DirShield to restore this folder."),
+                    None => {
+                        // Signed out since the prompt opened: the main window
+                        // asks where to restore the folder once signed in.
+                        open_main_with_action(app, st);
+                        return Ok("Sign in to DirShield to choose where to restore this folder.".into());
+                    }
                 };
                 quick_unlock_core(app, st, &r, &original, None)?;
                 Ok(format!("\u{201c}{name}\u{201d} is unlocked."))
@@ -168,14 +199,20 @@ pub async fn prompt_submit(app: AppHandle, password: String, use_hello: Option<b
 /// handle (Secure Lock folders, folders DirShield doesn't know).
 #[tauri::command]
 pub fn prompt_open_main(app: AppHandle, state: tauri::State<'_, AppState>) {
-    if let Some(a) = state.prompt.lock().take() {
-        if state.session.is_unlocked() {
+    open_main_with_action(&app, &state);
+}
+
+/// Moves the prompt's action to the main window (run there now if signed
+/// in, otherwise after sign-in) and closes the prompt.
+fn open_main_with_action(app: &AppHandle, st: &AppState) {
+    if let Some(a) = st.prompt.lock().take() {
+        if st.session.is_unlocked() {
             let _ = app.emit_to("main", "shell-action", &a);
         } else {
-            *state.pending.lock() = Some(a);
+            *st.pending.lock() = Some(a);
         }
     }
-    crate::app::windows::show_main(&app);
+    crate::app::windows::show_main(app);
     if let Some(w) = app.get_webview_window("prompt") {
         let _ = w.close();
     }

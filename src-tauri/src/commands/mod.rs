@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::app::{AppState, BrowseSession, WorkSession};
 use crate::domain::error::{invalid, Error, Result};
+use crate::domain::policy::{self, Protected, TargetContext};
 use crate::platform::fsutil::{self, is_same_or_inside};
 use crate::platform::search;
 use crate::platform::shell::{self, ShellAction};
@@ -160,6 +161,20 @@ pub struct VaultInfo {
     pub restored_path: Option<String>,
     /// Restored for a work session: it is locked again when DirShield signs out.
     pub work_session: bool,
+    /// Restored for a work session that DirShield never ended (it crashed,
+    /// was killed or the power failed): the folder is still decrypted on disk
+    /// and should be locked again.
+    pub relock_pending: bool,
+}
+
+/// Settings key marking a work session that has not been ended yet. Work
+/// sessions live in memory only; this flag outlives a crash.
+fn work_pending_key(id: &str) -> String {
+    format!("work.pending.{id}")
+}
+
+fn is_relock_pending(st: &AppState, r: &VaultRow) -> bool {
+    r.mode == "secure" && r.status == "restored" && !st.work.lock().contains_key(&r.id) && st.db.get_setting(&work_pending_key(&r.id)).ok().flatten().is_some()
 }
 
 fn info(st: &AppState, mk: &[u8; 32], r: &VaultRow) -> VaultInfo {
@@ -185,6 +200,7 @@ fn info(st: &AppState, mk: &[u8; 32], r: &VaultRow) -> VaultInfo {
         busy: st.ops.is_vault_busy(&r.id),
         restored_path: r.restored_enc.as_deref().and_then(|e| crypto::decrypt_text(&mdk, e, &aad(&r.id, "restored")).ok()),
         work_session: st.work.lock().contains_key(&r.id),
+        relock_pending: is_relock_pending(st, r),
     }
 }
 
@@ -261,9 +277,33 @@ fn store_quick_verifier(st: &AppState, id: &str, password: &str) -> Result<()> {
     Ok(())
 }
 
+/// The machine, DirShield's own locations and the protected folders, for the
+/// checks in [`policy`]. `except`: a vault left out of the protected list (when
+/// re-locking its own folder). `with_restored`: also list restored vaults, at
+/// both their original and their restored locations.
+fn target_context(st: &AppState, mk: &[u8; 32], except: Option<&str>, with_restored: bool) -> Result<TargetContext> {
+    let mut protected = Vec::new();
+    for r in all_vaults(st)? {
+        if Some(r.id.as_str()) == except || (r.status == "restored" && !with_restored) {
+            continue;
+        }
+        let i = info(st, mk, &r);
+        let vault_dir = (r.mode == "secure").then(|| PathBuf::from(&r.vault_path));
+        if with_restored {
+            if let Some(rp) = i.restored_path.as_deref().filter(|p| !p.is_empty()) {
+                protected.push(Protected { name: i.name.clone(), original: PathBuf::from(rp), vault_dir: None });
+            }
+        }
+        protected.push(Protected { name: i.name, original: PathBuf::from(i.original_path), vault_dir });
+    }
+    // An unreadable path decrypts to "": never let it match everything.
+    protected.retain(|p| !p.original.as_os_str().is_empty());
+    Ok(TargetContext::from_env(st.dirs.base.clone(), default_vault_root(st), protected))
+}
+
 /// Folders that must never be locked: system locations, profile roots and
 /// well-known folders, DirShield's own storage, and anything overlapping an
-/// already protected folder.
+/// already protected folder (see [`policy::check_target`]).
 /// `except`: the vault whose own folder this is (when re-locking it).
 fn validate_target(st: &AppState, mk: &[u8; 32], raw: &str, except: Option<&str>) -> Result<PathBuf> {
     let p = fsutil::normalize(Path::new(raw))?;
@@ -271,57 +311,7 @@ fn validate_target(st: &AppState, mk: &[u8; 32], raw: &str, except: Option<&str>
     if !meta.is_dir() || scan::is_link(&meta) {
         return invalid("Select a regular folder. Files, symbolic links and junctions can't be locked.");
     }
-    if p.parent().is_none() || p.parent() == Some(Path::new("")) {
-        return invalid("Whole drives can't be locked. Choose a folder instead.");
-    }
-    let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
-    for k in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "ProgramW6432"] {
-        if let Some(sys) = env(k) {
-            if is_same_or_inside(&p, &sys) || is_same_or_inside(&sys, &p) {
-                return invalid("System and program folders can't be locked.");
-            }
-        }
-    }
-    if let Some(profile) = env("USERPROFILE") {
-        if is_same_or_inside(&profile, &p) {
-            return invalid("Your user profile folder (or a folder containing it) can't be locked. Choose a folder inside it.");
-        }
-        for k in ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos", "OneDrive", "AppData"] {
-            if fsutil::path_key(&p) == fsutil::path_key(&profile.join(k)) {
-                return invalid(format!("The {k} folder itself can't be locked. Choose a folder inside it."));
-            }
-        }
-        if is_same_or_inside(&p, &profile.join("AppData")) {
-            return invalid("Application data folders can't be locked.");
-        }
-    }
-    if is_same_or_inside(&p, &st.dirs.base) || is_same_or_inside(&st.dirs.base, &p) {
-        return invalid("This folder contains DirShield's own storage.");
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if is_same_or_inside(dir, &p) {
-                return invalid("This folder contains the DirShield application.");
-            }
-        }
-    }
-    let vault_root = default_vault_root(st);
-    if is_same_or_inside(&vault_root, &p) {
-        return invalid("This folder contains the DirShield vault storage location.");
-    }
-    for r in all_vaults(st)? {
-        if r.status == "restored" || Some(r.id.as_str()) == except {
-            continue;
-        }
-        let i = info(st, mk, &r);
-        let orig = PathBuf::from(&i.original_path);
-        if is_same_or_inside(&p, &orig) || is_same_or_inside(&orig, &p) {
-            return Err(Error::Conflict(format!("This folder overlaps \"{}\", which is already protected.", i.name)));
-        }
-        if r.mode == "secure" && (is_same_or_inside(Path::new(&r.vault_path), &p) || is_same_or_inside(&p, Path::new(&r.vault_path))) {
-            return invalid("This folder contains DirShield vault data.");
-        }
-    }
+    policy::check_target(&p, &target_context(st, mk, except, false)?)?;
     Ok(p)
 }
 

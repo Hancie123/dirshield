@@ -196,6 +196,88 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::rename(from, to)
 }
 
+/// Opens a file or folder for reading its attributes only (works on a
+/// Quick-Locked folder: its deny ACE leaves attribute reads allowed).
+#[cfg(windows)]
+struct AttrHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl AttrHandle {
+    fn open(p: &Path) -> Option<Self> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+        let w = wide(p);
+        let h = unsafe { CreateFileW(PCWSTR(w.as_ptr()), FILE_READ_ATTRIBUTES.0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None) }.ok()?;
+        Some(Self(h))
+    }
+
+    fn id(&self) -> Option<windows::Win32::Storage::FileSystem::FILE_ID_INFO> {
+        use windows::Win32::Storage::FileSystem::{FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO};
+        let mut info = FILE_ID_INFO::default();
+        unsafe { GetFileInformationByHandleEx(self.0, FileIdInfo, &mut info as *mut _ as *mut std::ffi::c_void, std::mem::size_of::<FILE_ID_INFO>() as u32) }.ok()?;
+        Some(info)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AttrHandle {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+/// Identity of a file or folder that survives renames and moves within its
+/// volume: `<volume serial>-<128-bit file id>` in hex.
+#[cfg(windows)]
+pub fn file_id(p: &Path) -> Option<String> {
+    let info = AttrHandle::open(p)?.id()?;
+    Some(format!("{:016x}-{}", info.VolumeSerialNumber, hex::encode(info.FileId.Identifier)))
+}
+#[cfg(not(windows))]
+pub fn file_id(_p: &Path) -> Option<String> {
+    None
+}
+
+/// Current location of the file or folder with identity `id` (from
+/// [`file_id`]), looked up on the volume that holds `last_known` (which
+/// doesn't have to exist any more).
+#[cfg(windows)]
+pub fn path_by_file_id(last_known: &Path, id: &str) -> Option<PathBuf> {
+    use windows::Win32::Storage::FileSystem::{
+        GetFinalPathNameByHandleW, OpenFileById, ExtendedFileIdType, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS, VOLUME_NAME_DOS,
+    };
+    let (serial, fid) = id.split_once('-')?;
+    let serial = u64::from_str_radix(serial, 16).ok()?;
+    let fid: [u8; 16] = hex::decode(fid).ok()?.try_into().ok()?;
+    // Any handle on the volume serves as the hint; use its root.
+    let mut root = PathBuf::new();
+    for c in last_known.components().take_while(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir)) {
+        root.push(c.as_os_str());
+    }
+    let hint = AttrHandle::open(&root)?;
+    if hint.id()?.VolumeSerialNumber != serial {
+        return None; // a different volume is mounted there now
+    }
+    let desc = FILE_ID_DESCRIPTOR {
+        dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
+        Type: ExtendedFileIdType,
+        Anonymous: FILE_ID_DESCRIPTOR_0 { ExtendedFileId: FILE_ID_128 { Identifier: fid } },
+    };
+    let h = unsafe { OpenFileById(hint.0, &desc, FILE_READ_ATTRIBUTES.0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, FILE_FLAG_BACKUP_SEMANTICS) }.ok()?;
+    let h = AttrHandle(h);
+    let mut buf = vec![0u16; 32_768];
+    let n = unsafe { GetFinalPathNameByHandleW(h.0, &mut buf, GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0)) } as usize;
+    if n == 0 || n >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(display_path(Path::new(&String::from_utf16_lossy(&buf[..n])))))
+}
+#[cfg(not(windows))]
+pub fn path_by_file_id(_last_known: &Path, _id: &str) -> Option<PathBuf> {
+    None
+}
+
 /// Volume mount point (e.g. `C:\`) for a path.
 #[cfg(windows)]
 pub fn volume_root(p: &Path) -> String {

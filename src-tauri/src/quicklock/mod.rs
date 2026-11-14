@@ -43,6 +43,12 @@ pub struct QuickState {
     /// A locked-folder icon (`desktop.ini`) was added; see `folder_icon`.
     #[serde(default)]
     pub icon: bool,
+    /// NTFS identity of the folder (`fsutil::file_id`). The deny ACE can't
+    /// stop the folder being renamed or moved within its volume (Windows
+    /// allows that to anyone who may delete children of its parent), so this
+    /// is how DirShield finds it again. Older locks: recorded on first check.
+    #[serde(default)]
+    pub file_id: Option<String>,
 }
 
 const HIDE: u32 = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
@@ -122,7 +128,8 @@ pub fn lock(original: &Path, store: Option<&Path>, id: &str, hide: bool, icon_di
     } else {
         fsutil::notify_shell_changed(original);
     }
-    Ok(QuickState { current_path: fsutil::display_path(&current), moved, prev_attrs, hidden: hide, search_rule, tree_marked: true, kept_not_indexed, icon })
+    let file_id = fsutil::file_id(&current);
+    Ok(QuickState { current_path: fsutil::display_path(&current), moved, prev_attrs, hidden: hide, search_rule, tree_marked: true, kept_not_indexed, icon, file_id })
 }
 
 /// Reverses a Quick Lock. `dest` defaults to the original location; an
@@ -175,6 +182,32 @@ pub fn unlock(state: &QuickState, original: &Path, dest: Option<&Path>) -> Resul
         fsutil::notify_shell_changed(&final_path);
     }
     Ok(final_path)
+}
+
+/// Brings `state` up to date with where the folder actually is: a locked
+/// folder renamed or moved within its volume is found again by its file id,
+/// and a lock made before file ids were recorded gets one. Returns true if
+/// `state` changed (the caller saves it).
+pub fn relocate(state: &mut QuickState) -> bool {
+    let current = PathBuf::from(&state.current_path);
+    if current.is_dir() {
+        if state.file_id.is_none() {
+            state.file_id = fsutil::file_id(&current);
+            return state.file_id.is_some();
+        }
+        return false;
+    }
+    let Some(found) = state.file_id.as_deref().and_then(|id| fsutil::path_by_file_id(&current, id)) else { return false };
+    if fsutil::path_key(&found) == fsutil::path_key(&current) {
+        return false;
+    }
+    // The Windows Search exclusion follows the folder.
+    if state.search_rule {
+        search::remove_exclusion(&current);
+        state.search_rule = search::exclude(&found);
+    }
+    state.current_path = fsutil::display_path(&found);
+    true
 }
 
 /// Toggle visibility of a Quick-Locked folder (the access restriction stays).
@@ -265,6 +298,7 @@ pub fn recover_orphan(store: &Path, o: &Orphan, dest: &Path) -> Result<PathBuf> 
         tree_marked: false,
         kept_not_indexed: Vec::new(),
         icon: false,
+        file_id: None,
     };
     let p = unlock(&state, dest, None)?;
     let _ = fs::remove_file(sidecar_path(store, &o.id));

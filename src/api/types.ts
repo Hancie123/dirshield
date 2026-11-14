@@ -11,6 +11,10 @@ export interface AppInfo {
   version: string;
   dataDir: string;
   defaultVaultRoot: string;
+  /** Windows Hello is set up on this PC. */
+  helloAvailable: boolean;
+  /** Windows Hello unlock is turned on for DirShield. */
+  hello: boolean;
 }
 
 export type ProtectionMode = "quick" | "secure";
@@ -47,6 +51,8 @@ export interface VaultInfo {
   restoredPath: string | null;
   /** Restored for a work session: locked again when DirShield signs out or Windows locks. */
   workSession: boolean;
+  /** A work session DirShield never ended (crash, forced exit, power loss): still decrypted on disk. */
+  relockPending: boolean;
 }
 
 export interface VaultDetails extends VaultInfo {
@@ -162,6 +168,24 @@ export interface LockAllReport {
   skipped: string[];
 }
 
+export interface ActivityFilter {
+  action?: string | null;
+  vaultId?: string | null;
+  /** Entries about folders that are no longer protected. */
+  removed?: boolean;
+}
+
+export interface ActivityPage {
+  rows: Activity[];
+  total: number;
+}
+
+export interface ActivityFacets {
+  actions: string[];
+  folders: { id: string; name: string }[];
+  hasRemoved: boolean;
+}
+
 export interface LogCheck {
   ok: boolean;
   entries: number;
@@ -174,7 +198,11 @@ export interface PromptInfo {
   action: "lock" | "quick-lock" | "secure-lock" | "unlock" | "unhide" | "settings" | "uninstall";
   path: string;
   name: string;
-  vault: { keyMode: "master" | "password"; hidden: boolean } | null;
+  vault: { keyMode: "master" | "password"; hidden: boolean; moved: boolean } | null;
+  /** The prompt only signs in; the action continues in the main window. */
+  handoff: boolean;
+  /** Windows Hello can be used instead of the master password. */
+  hello: boolean;
 }
 
 export interface ShellAction {
@@ -189,7 +217,8 @@ export interface Orphan {
   lockedAt: number | null;
 }
 
-export type CredentialKind = "master" | "folder" | "recovery";
+/** "hello" is Windows Hello (no secret; master-password folders only). */
+export type CredentialKind = "master" | "folder" | "recovery" | "hello";
 
 export interface Credential {
   kind: CredentialKind;

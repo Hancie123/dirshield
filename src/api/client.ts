@@ -3,7 +3,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  Activity,
+  ActivityFacets,
+  ActivityFilter,
+  ActivityPage,
   AppInfo,
   ConflictPolicy,
   Credential,
@@ -27,6 +29,9 @@ export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
   setupMaster: (password: string, confirm: string) => invoke<string>("setup_master", { password, confirm }),
   login: (password: string) => invoke<void>("login", { password }),
+  loginHello: () => invoke<void>("login_hello"),
+  helloEnable: (password: string) => invoke<void>("hello_enable", { password }),
+  helloDisable: () => invoke<void>("hello_disable"),
   logout: () => invoke<void>("logout"),
   touch: () => invoke<void>("touch"),
   passwordStrength: (password: string) => invoke<PasswordStrength>("password_strength", { password }),
@@ -39,17 +44,20 @@ export const api = {
   findByPath: (path: string) => invoke<VaultInfo | null>("find_by_path", { path }),
   vaultDetails: (id: string) => invoke<VaultDetails>("vault_details", { id }),
 
-  quickLock: (path: string, password: string, folderPassword: string | null, hide: boolean) =>
-    invoke<VaultInfo>("quick_lock", { path, credential: { kind: "master", secret: password }, folderPassword, hide }),
+  /** `credential`: the master password, or Windows Hello. */
+  quickLock: (path: string, credential: Credential, folderPassword: string | null, hide: boolean) =>
+    invoke<VaultInfo>("quick_lock", { path, credential, folderPassword, hide }),
   quickUnlock: (id: string, credential: Credential, dest: string | null) => invoke<string>("quick_unlock", { id, credential, dest }),
   quickSetHidden: (id: string, hidden: boolean, credential: Credential) => invoke<void>("quick_set_hidden", { id, hidden, credential }),
 
-  secureLock: (path: string, password: string, folderPassword: string | null, vaultRoot: string | null) =>
-    invoke<string>("secure_lock", { path, credential: { kind: "master", secret: password }, folderPassword, vaultRoot }),
+  secureLock: (path: string, credential: Credential, folderPassword: string | null, vaultRoot: string | null) =>
+    invoke<string>("secure_lock", { path, credential, folderPassword, vaultRoot }),
   restoreVault: (id: string, credential: Credential, dest: string | null, conflict: ConflictPolicy, workSession = false) =>
     invoke<string>("restore_vault", { id, credential, dest, conflict, workSession }),
   workSessionEnd: (id: string) => invoke<string | null>("work_session_end", { id }),
   workSessionKeep: (id: string) => invoke<void>("work_session_keep", { id }),
+  /** Locks again a folder left decrypted by an unfinished work session. `credential` is needed for folder-password vaults only. */
+  workSessionRecover: (id: string, credential: Credential | null = null) => invoke<string>("work_session_recover", { id, credential }),
   lockAllFolders: () => invoke<LockAllReport>("lock_all_folders"),
   verifyVault: (id: string, credential: Credential) => invoke<string>("verify_vault", { id, credential }),
   removeOriginals: (id: string, credential: Credential, confirmName: string) => invoke<string>("remove_originals", { id, credential, confirmName }),
@@ -76,14 +84,16 @@ export const api = {
   opDiscard: (id: string) => invoke<void>("op_discard", { id }),
   clearFinishedOperations: () => invoke<void>("clear_finished_operations"),
 
-  listActivity: (limit: number) => invoke<Activity[]>("list_activity", { limit }),
+  listActivity: (filter: ActivityFilter, offset: number, limit: number) => invoke<ActivityPage>("list_activity", { filter, offset, limit }),
+  activityFacets: () => invoke<ActivityFacets>("activity_facets"),
+  exportActivityCsv: (dest: string, filter: ActivityFilter, labels: Record<string, string>) => invoke<number>("export_activity_csv", { dest, filter, labels }),
   clearActivity: () => invoke<void>("clear_activity"),
   verifyActivityLog: () => invoke<LogCheck>("verify_activity_log"),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   takePendingAction: () => invoke<ShellAction | null>("take_pending_action"),
   promptInfo: () => invoke<PromptInfo>("prompt_info"),
-  promptSubmit: (password: string) => invoke<string>("prompt_submit", { password }),
+  promptSubmit: (password: string, useHello = false) => invoke<string>("prompt_submit", { password, useHello }),
   promptOpenMain: () => invoke<void>("prompt_open_main"),
   promptClose: () => invoke<void>("prompt_close"),
   setWindowMode: (full: boolean, width?: number, height?: number) => invoke<void>("set_window_mode", { full, width, height }),

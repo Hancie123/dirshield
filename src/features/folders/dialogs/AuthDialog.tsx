@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { errMsg, type Credential, type OperationInfo, type VaultInfo } from "@/api";
 import { useStore } from "@/app/store";
-import { CredentialFields, defaultKind } from "@/components/CredentialFields";
+import { CredentialFields, credReady, defaultKind } from "@/components/CredentialFields";
 import { OperationProgress } from "@/components/OperationProgress";
 import { FluentButton, FluentDialog, InfoBar, useNotify } from "@/components/fluent";
 import { formatCount } from "@/lib/format";
@@ -79,7 +79,7 @@ export function AuthDialog({
       dismissable={!busy}
       footer={
         <>
-          <FluentButton variant={danger ? "danger" : "accent"} disabled={!cred.secret || !canSubmit || busy} onClick={submit}>
+          <FluentButton variant={danger ? "danger" : "accent"} disabled={!credReady(cred) || !canSubmit || busy} onClick={submit}>
             {busy ? "Working…" : confirmLabel}
           </FluentButton>
           <FluentButton disabled={busy} onClick={closeDialog}>

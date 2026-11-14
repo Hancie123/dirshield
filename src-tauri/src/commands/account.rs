@@ -63,11 +63,12 @@ pub async fn setup_master(app: AppHandle, password: String, confirm: String) -> 
 
 #[tauri::command]
 pub async fn login(app: AppHandle, password: String) -> Result<()> {
-    run(&app, move |_, st| {
+    run(&app, move |app, st| {
         let password = Zeroizing::new(password);
         let mk = verify_master(st, &password)?;
         st.session.unlock(mk);
         st.db.log("sign_in", None, "success", None);
+        notify_relock_pending(app, st);
         Ok(())
     })
     .await
@@ -76,11 +77,12 @@ pub async fn login(app: AppHandle, password: String) -> Result<()> {
 /// Signs in with Windows Hello instead of the master password.
 #[tauri::command]
 pub async fn login_hello(app: AppHandle) -> Result<()> {
-    run(&app, move |_, st| {
+    run(&app, move |app, st| {
         auth::load_metadata(&st.db)?.ok_or(Error::NotInitialized)?;
         let mk = hello::unlock(&st.db)?;
         st.session.unlock(mk);
         st.db.log("sign_in_windows_hello", None, "success", None);
+        notify_relock_pending(app, st);
         Ok(())
     })
     .await

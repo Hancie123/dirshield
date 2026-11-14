@@ -203,6 +203,11 @@ impl Db {
         Ok(())
     }
 
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        self.lock().execute("DELETE FROM settings WHERE setting_key=?1", [key])?;
+        Ok(())
+    }
+
     pub fn all_settings(&self) -> Result<Vec<(String, String)>> {
         let c = self.lock();
         let mut st = c.prepare("SELECT setting_key, setting_value FROM settings ORDER BY setting_key")?;

@@ -66,6 +66,8 @@ fn relock_and_clean(app: &AppHandle, st: &AppState, r: &VaultRow, ws: WorkSessio
     st.db.lock().execute("UPDATE vaults SET name=?2, original_path=?3, updated_at=?4 WHERE id=?1", params![r.id, ws.name_enc, ws.path_enc, now_ms()])?;
     let (tf, tb): (i64, i64) = st.db.lock().query_row("SELECT total_files, total_bytes FROM operations WHERE id=?1", [&op_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
     spawn_relock(app, st, op_id.clone(), r.id.clone(), PathBuf::from(&r.vault_path), ws.source, ws.name, ws.vk, tf as u64, tb as u64, true)?;
+    // The re-lock is now a resumable operation of its own.
+    let _ = st.db.delete_setting(&work_pending_key(&r.id));
     Ok(op_id)
 }
 
@@ -75,7 +77,11 @@ fn end_work_session(app: &AppHandle, st: &AppState, id: &str) -> Result<Option<S
     let Some(ws) = st.work.lock().remove(id) else { return Ok(None) };
     let r = match load_vault(st, id) {
         Ok(r) if r.status == "restored" => r,
-        _ => return Ok(None), // re-locked or removed some other way
+        _ => {
+            // Re-locked or removed some other way.
+            let _ = st.db.delete_setting(&work_pending_key(id));
+            return Ok(None);
+        }
     };
     if st.ops.is_vault_busy(id) {
         st.work.lock().insert(id.to_string(), ws);
@@ -124,13 +130,76 @@ pub async fn work_session_end(app: AppHandle, id: String) -> Result<Option<Strin
 pub async fn work_session_keep(app: AppHandle, id: String) -> Result<()> {
     run(&app, move |app, st| {
         st.session.master_active()?;
-        if st.work.lock().remove(&id).is_some() {
+        let pending = st.db.get_setting(&work_pending_key(&id))?.is_some();
+        let _ = st.db.delete_setting(&work_pending_key(&id));
+        if st.work.lock().remove(&id).is_some() || pending {
             st.db.log("work_session_kept", Some(&id), "info", None);
         }
         emit_vaults_changed(app);
         Ok(())
     })
     .await
+}
+
+/// Locks a folder again whose work session was cut short by a crash, a
+/// forced exit or a power failure (see `VaultInfo::relock_pending`). The
+/// folder is re-encrypted and the unlocked copy removed, as when a work
+/// session ends. Master-password folders need no credential while signed in.
+#[tauri::command]
+pub async fn work_session_recover(app: AppHandle, id: String, credential: Option<Credential>) -> Result<String> {
+    run(&app, move |app, st| {
+        let mk = st.session.master_active()?;
+        let r = load_vault(st, &id)?;
+        if !is_relock_pending(st, &r) {
+            return invalid("This folder has no unfinished work session.");
+        }
+        let vk = match &credential {
+            Some(c) => secure_vault_key(st, &r, c)?,
+            None if r.key_mode == "master" => {
+                let h = VaultHeader::read(Path::new(&r.vault_path))?;
+                let vk = h.unwrap_with_master(&mk)?;
+                h.verify_mac(&vk)?;
+                vk
+            }
+            None => return Err(Error::AuthFailed),
+        };
+        let i = info(st, &mk, &r);
+        let src = i.restored_path.clone().ok_or_else(|| Error::NotFound("where this folder was restored to".into()))?;
+        let mdk = crypto::metadata_key(&mk);
+        let name = folder_name(&src);
+        let ws = WorkSession {
+            vk,
+            source: PathBuf::from(&src),
+            name_enc: crypto::encrypt_text(&mdk, &name, &aad(&r.id, "name")),
+            path_enc: crypto::encrypt_text(&mdk, &src, &aad(&r.id, "path")),
+            name,
+        };
+        let op = relock_and_clean(app, st, &r, ws)?;
+        st.db.log("work_session_recovered", Some(&id), "info", None);
+        emit_vaults_changed(app);
+        Ok(op)
+    })
+    .await
+}
+
+/// After sign-in: points out folders still decrypted from a work session
+/// that DirShield never got to end.
+pub(super) fn notify_relock_pending(app: &AppHandle, st: &AppState) {
+    let Ok(mk) = st.session.master() else { return };
+    let Ok(rows) = all_vaults(st) else { return };
+    let names: Vec<String> = rows.iter().filter(|r| is_relock_pending(st, r)).map(|r| info(st, &mk, r).name).collect();
+    if names.is_empty() {
+        return;
+    }
+    let list = names.iter().map(|n| format!("\u{201c}{n}\u{201d}")).collect::<Vec<_>>().join(", ");
+    let _ = app.emit(
+        "notice",
+        serde_json::json!({
+            "title": "Folders left unlocked",
+            "body": format!("DirShield closed before it could lock {list} again, so they are still decrypted on disk. Choose \u{201c}Lock again now\u{201d} for each one in Protected folders."),
+            "severity": "warning",
+        }),
+    );
 }
 
 #[derive(Serialize, Default)]
@@ -244,6 +313,11 @@ fn verify_interval_days(st: &AppState) -> u64 {
 /// opened without it.
 pub fn background_tick(app: &AppHandle) {
     let st = app.state::<AppState>();
+    // Needs no key: runs while signed out too.
+    if sync_quick_locations(&st, st.session.master().ok().as_deref()) {
+        emit_vaults_changed(app);
+    }
+    check_quick_locks(app, &st);
     let Ok(mk) = st.session.master() else { return };
     let _ = st.db.checkpoint_log(&mk);
     if st.ops.any_active() {
@@ -286,5 +360,66 @@ pub fn background_tick(app: &AppHandle) {
             }
         }
         return; // one at a time
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quick Lock watchdog
+// ---------------------------------------------------------------------------
+
+/// Quick Lock is an access restriction the folder's owner can always remove
+/// (any program running as this user can). Once a minute, every Quick-Locked
+/// folder is checked; a removed restriction is put back and reported.
+fn check_quick_locks(app: &AppHandle, st: &AppState) {
+    /// Folders whose restriction couldn't be put back (reported once).
+    static FAILED: parking_lot::Mutex<Vec<String>> = parking_lot::const_mutex(Vec::new());
+    let Ok(rows) = all_vaults(st) else { return };
+    for id in rows.into_iter().filter(|r| r.mode == "quick").map(|r| r.id) {
+        // Held across re-reading the row and fixing the folder: an unlock in
+        // progress removes the restriction on purpose.
+        let _guard = st.quick_guard.lock();
+        let Ok(r) = load_vault(st, &id) else { continue }; // unlocked meanwhile
+        if !matches!(r.status.as_str(), "quick_locked" | "quick_visible") || st.ops.is_vault_busy(&r.id) {
+            continue;
+        }
+        let Some(q) = r.quick.as_deref().and_then(|s| serde_json::from_str::<QuickState>(s).ok()) else { continue };
+        let path = PathBuf::from(&q.current_path);
+        // Missing (drive unplugged, folder moved): nothing to restrict here.
+        if !path.is_dir() {
+            continue;
+        }
+        match quicklock::acl::is_restricted(&path) {
+            Ok(false) => {}
+            Ok(true) => {
+                FAILED.lock().retain(|f| f != &r.id);
+                continue;
+            }
+            Err(_) => continue,
+        }
+        // The name is encrypted; without the master key, stay generic.
+        let who = st.session.master().ok().map(|mk| format!("\u{201c}{}\u{201d}", info(st, &mk, &r).name)).unwrap_or_else(|| "A Quick Lock folder".into());
+        match quicklock::acl::apply_deny(&path) {
+            Ok(()) => {
+                FAILED.lock().retain(|f| f != &r.id);
+                fsutil::notify_shell_changed(&path);
+                st.db.log("quick_lock_reapplied", Some(&r.id), "warning", Some("the access restriction had been removed outside DirShield"));
+                notify(
+                    app,
+                    "DirShield: Quick Lock was removed",
+                    &format!("{who} was unlocked outside DirShield and has been locked again. Its files may have been read in the meantime. Use Secure Lock for data that must stay private."),
+                );
+            }
+            Err(e) => {
+                {
+                    let mut failed = FAILED.lock();
+                    if failed.contains(&r.id) {
+                        continue; // reported already
+                    }
+                    failed.push(r.id.clone());
+                }
+                st.db.log("quick_lock_reapplied", Some(&r.id), "failed", Some(&e.to_string()));
+                notify(app, "DirShield: Quick Lock failed", &format!("{who} was unlocked outside DirShield and couldn't be locked again: {e}"));
+            }
+        }
     }
 }

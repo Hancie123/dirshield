@@ -14,6 +14,7 @@ export type DialogState =
   | { kind: "removeOriginals"; vault: VaultInfo }
   | { kind: "delete"; vault: VaultInfo }
   | { kind: "verify"; vault: VaultInfo }
+  | { kind: "recoverWork"; vault: VaultInfo }
   | { kind: "visibility"; vault: VaultInfo; hidden: boolean }
   | { kind: "resume"; op: OperationInfo; mode: "resume" | "retry" | "skip" }
   | { kind: "errors"; op: OperationInfo }
@@ -26,6 +27,8 @@ interface Store {
   unlocked: boolean;
   setUnlocked: (v: boolean) => void;
   vaults: VaultInfo[];
+  /** `vaults` and `ops` have been fetched at least once since signing in. */
+  loaded: boolean;
   ops: OperationInfo[];
   live: Record<string, Progress>;
   refresh: () => Promise<void>;
@@ -61,6 +64,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [unlocked, setUnlocked] = useState(false);
   const [vaults, setVaults] = useState<VaultInfo[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [ops, setOps] = useState<OperationInfo[]>([]);
   const [live, setLive] = useState<Record<string, Progress>>({});
   const [page, setPage] = useState<Page>("home");
@@ -86,6 +90,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const [v, o] = await Promise.all([api.listVaults(), api.listOperations()]);
       setVaults(v);
       setOps(o);
+      setLoaded(true);
     } catch {
       /* session may have just locked */
     }
@@ -114,6 +119,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [unlocked]);
 
   useEffect(() => {
+    if (!unlocked) setLoaded(false);
     if (unlocked) {
       refresh();
       api.getSettings().then((s) => setThemePreference(s.theme)).catch(() => {});
@@ -161,12 +167,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setUnlocked(false);
         setDialog(null);
         setVaults([]);
+        setLoaded(false);
       }),
       listen<ShellAction>("shell-action", (e) => handleAction(e.payload)),
       // Signed in from the Explorer menu window; its action is waiting as the pending action.
       listen("session-unlocked", () => refreshInfo().catch(() => {})),
       // Background results (scheduled integrity checks, Lock all from the tray).
-      listen<{ title: string; body: string }>("notice", (e) => notify({ severity: e.payload.title.includes("failed") ? "error" : "info", title: e.payload.title, message: e.payload.body })),
+      listen<{ title: string; body: string; severity?: "info" | "warning" | "error" }>("notice", (e) =>
+        notify({ severity: e.payload.severity ?? (e.payload.title.includes("failed") ? "error" : e.payload.title.includes("removed") ? "warning" : "info"), title: e.payload.title, message: e.payload.body }),
+      ),
     ];
     return () => {
       subs.forEach((p) => p.then((un) => un()));
@@ -244,6 +253,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     unlocked,
     setUnlocked,
     vaults,
+    loaded,
     ops,
     live,
     refresh,

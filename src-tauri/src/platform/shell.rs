@@ -16,16 +16,7 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 #[cfg(windows)]
 const RUN_VALUE: &str = "DirShield";
 
-/// (subkey, label, verb). `lock` locks in place and keeps the folder visible;
-/// `quick-lock` (kept for older registrations) locks and hides it.
-pub const VERBS: &[(&str, &str, &str)] = &[
-    ("01lock", "Lock Folder", "lock"),
-    ("02lockhide", "Lock and Hide Folder", "quick-lock"),
-    ("03secure", "Secure Lock (encrypt)", "secure-lock"),
-    ("04unlock", "Unlock Folder", "unlock"),
-    ("05unhide", "Unhide Folder", "unhide"),
-    ("06settings", "DirShield Settings", "settings"),
-];
+pub use super::menu_spec::VERBS;
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -73,7 +64,7 @@ pub fn register_context_menu() -> Result<()> {
         let (k, _) = root.create_subkey(format!(r"shell\{key}"))?;
         k.set_value("MUIVerb", label)?;
         k.set_value("Icon", &format!("\"{exe_s}\",0"))?;
-        if *verb == "settings" {
+        if super::menu_spec::SEPARATOR_BEFORE.contains(verb) {
             k.set_value("CommandFlags", &0x20u32)?; // separator before
         }
         let (cmd, _) = k.create_subkey("command")?;

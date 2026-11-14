@@ -21,10 +21,55 @@ pub async fn free_space(app: AppHandle, path: String) -> Result<u64> {
     run(&app, move |_, _| fsutil::free_space(Path::new(&path))).await
 }
 
+/// Follows Quick-Locked folders that were renamed or moved in Explorer (their
+/// access restriction can't prevent that; see `QuickState::file_id`) and
+/// saves where they are now. With the master key, a folder locked in place
+/// also gets its recorded location updated, since that's where it unlocks.
+/// Returns true if any record changed.
+pub(crate) fn sync_quick_locations(st: &AppState, mk: Option<&[u8; 32]>) -> bool {
+    let Ok(rows) = all_vaults(st) else { return false };
+    let mut changed = false;
+    for id in rows.into_iter().filter(|r| r.mode == "quick").map(|r| r.id) {
+        let _guard = st.quick_guard.lock();
+        let Ok(r) = load_vault(st, &id) else { continue };
+        if !matches!(r.status.as_str(), "quick_locked" | "quick_visible") || st.ops.is_vault_busy(&r.id) {
+            continue;
+        }
+        let Some(mut q) = r.quick.as_deref().and_then(|s| serde_json::from_str::<QuickState>(s).ok()) else { continue };
+        let old = q.current_path.clone();
+        let mut sets: Vec<(&str, String)> = Vec::new();
+        if quicklock::relocate(&mut q) {
+            if let Ok(json) = serde_json::to_string(&q) {
+                sets.push(("quick_state", json));
+                sets.push(("vault_path", q.current_path.clone()));
+            }
+            if fsutil::path_key(Path::new(&old)) != fsutil::path_key(Path::new(&q.current_path)) {
+                st.db.log("quick_lock_moved", Some(&r.id), "warning", Some("the locked folder was renamed or moved outside DirShield"));
+            }
+        }
+        if let Some(mk) = mk.filter(|_| !q.moved) {
+            let current = info(st, mk, &r).original_path;
+            if fsutil::path_key(Path::new(&current)) != fsutil::path_key(Path::new(&q.current_path)) && Path::new(&q.current_path).is_dir() {
+                let mdk = crypto::metadata_key(mk);
+                sets.push(("original_path", crypto::encrypt_text(&mdk, &q.current_path, &aad(&r.id, "path"))));
+                sets.push(("name", crypto::encrypt_text(&mdk, &folder_name(&q.current_path), &aad(&r.id, "name"))));
+            }
+        }
+        for (col, val) in sets {
+            // Column names are the fixed literals above.
+            if st.db.lock().execute(&format!("UPDATE vaults SET {col}=?2, updated_at=?3 WHERE id=?1"), params![r.id, val, now_ms()]).is_ok() {
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 #[tauri::command]
 pub async fn list_vaults(app: AppHandle) -> Result<Vec<VaultInfo>> {
     run(&app, |_, st| {
         let mk = st.session.master()?;
+        sync_quick_locations(st, Some(&mk));
         Ok(all_vaults(st)?.iter().map(|r| info(st, &mk, r)).collect())
     })
     .await
@@ -34,6 +79,7 @@ pub async fn list_vaults(app: AppHandle) -> Result<Vec<VaultInfo>> {
 pub async fn find_by_path(app: AppHandle, path: String) -> Result<Option<VaultInfo>> {
     run(&app, move |_, st| {
         let mk = st.session.master()?;
+        sync_quick_locations(st, Some(&mk));
         let key = fsutil::path_key(Path::new(&path));
         for r in all_vaults(st)? {
             let i = info(st, &mk, &r);
@@ -182,7 +228,12 @@ pub async fn quick_unlock(app: AppHandle, id: String, credential: Credential, de
 }
 
 pub(super) fn quick_unlock_core(app: &AppHandle, st: &AppState, r: &VaultRow, original: &Path, dest: Option<&Path>) -> Result<String> {
-    let state: QuickState = serde_json::from_str(r.quick.as_deref().unwrap_or("{}"))?;
+    let mut state: QuickState = serde_json::from_str(r.quick.as_deref().unwrap_or("{}"))?;
+    // Until the row is gone, the background check would treat the removed
+    // restriction as tampering and put it back.
+    let _guard = st.quick_guard.lock();
+    // Renamed or moved since the last check: unlock it where it is now.
+    quicklock::relocate(&mut state);
     let final_path = quicklock::unlock(&state, original, dest)?;
     st.db.lock().execute("DELETE FROM vaults WHERE id=?1", [&r.id])?;
     st.db.log("quick_unlock", Some(&r.id), "success", None);
@@ -206,6 +257,7 @@ pub async fn quick_set_hidden(app: AppHandle, id: String, hidden: bool, credenti
 
 pub(super) fn quick_set_hidden_core(app: &AppHandle, st: &AppState, r: &VaultRow, hidden: bool) -> Result<()> {
     let mut state: QuickState = serde_json::from_str(r.quick.as_deref().unwrap_or("{}"))?;
+    quicklock::relocate(&mut state);
     quicklock::set_hidden(&mut state, hidden)?;
     st.db.lock().execute(
         "UPDATE vaults SET quick_state=?2, status=?3, updated_at=?4 WHERE id=?1",
@@ -290,6 +342,7 @@ pub async fn secure_lock(app: AppHandle, path: String, credential: Credential, f
             return invalid("The vault location can't be inside the folder you're locking.");
         }
         if custom_root.is_some() {
+            policy::check_vault_root(&root, &target_context(st, &mk, None, true)?)?;
             let _ = search::mark_not_indexed(&root);
         }
         let meta = auth::load_metadata(&st.db)?.ok_or(Error::NotInitialized)?;
@@ -372,6 +425,9 @@ pub(super) fn spawn_decrypt(
                     }
                     db2.log(action, Some(&vault_id), "success", None);
                     if let Some(w) = work {
+                        // Persisted first: if DirShield dies before the session
+                        // ends, the next sign-in offers to lock the folder again.
+                        let _ = db2.set_setting(&work_pending_key(&vault_id), &now_ms().to_string());
                         app2.state::<AppState>().work.lock().insert(vault_id.clone(), w);
                         db2.log("work_session_start", Some(&vault_id), "info", None);
                     }
@@ -390,6 +446,15 @@ pub(super) fn spawn_decrypt(
 
 pub(super) fn restored_enc(mk: &[u8; 32], vault_id: &str, dest: &str) -> String {
     crypto::encrypt_text(&crypto::metadata_key(mk), dest, &aad(vault_id, "restored"))
+}
+
+/// The folder exists and has something in it (an unreadable folder counts as
+/// non-empty).
+fn dir_has_entries(p: &Path) -> bool {
+    match std::fs::read_dir(p) {
+        Ok(mut it) => it.next().is_some(),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Destination checks shared by restore and extract.
@@ -422,6 +487,13 @@ pub async fn restore_vault(app: AppHandle, id: String, credential: Credential, d
         let dest = dest.filter(|d| !d.trim().is_empty()).unwrap_or_else(|| i.original_path.clone());
         let dest_p = PathBuf::from(&dest);
         check_dest(st, &r, &dest_p)?;
+        let work_session = work_session.unwrap_or(false);
+        // Ending a work session encrypts everything in the folder and then
+        // removes it, so the folder must hold only what the vault restores:
+        // anything already there would be swept into the vault and deleted.
+        if work_session && dir_has_entries(&dest_p) {
+            return invalid("A work session needs a new or empty folder: when it ends, everything in the folder is locked into the vault and the folder is removed. Restore to a different location, or turn off Work session.");
+        }
         let p = DecryptParams { dest: fsutil::display_path(&dest_p), conflict, prev_status: r.status.clone(), ..Default::default() };
         let op_id = engine::create_operation(&st.db, &id, "decrypt", &serde_json::to_string(&p)?)?;
         let ctrl = engine::Control::default();
@@ -431,25 +503,17 @@ pub async fn restore_vault(app: AppHandle, id: String, credential: Credential, d
         }
         let (tf, tb): (i64, i64) = st.db.lock().query_row("SELECT total_files, total_bytes FROM operations WHERE id=?1", [&op_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let enc = restored_enc(&mk, &id, &p.dest);
-        // A work session restores into exactly this folder (a renamed copy
-        // would not be the folder that gets locked again).
-        let work = match work_session.unwrap_or(false) {
-            true => {
-                if p.conflict == "rename" && dest_p.exists() {
-                    return invalid("For a work session, restore into a new folder or choose \"Skip\" for existing files.");
-                }
-                let name = folder_name(&p.dest);
-                let mdk = crypto::metadata_key(&mk);
-                Some(WorkSession {
-                    vk: Key32::new(*vk),
-                    source: dest_p.clone(),
-                    name_enc: crypto::encrypt_text(&mdk, &name, &aad(&id, "name")),
-                    path_enc: crypto::encrypt_text(&mdk, &p.dest, &aad(&id, "path")),
-                    name,
-                })
+        let work = work_session.then(|| {
+            let name = folder_name(&p.dest);
+            let mdk = crypto::metadata_key(&mk);
+            WorkSession {
+                vk: Key32::new(*vk),
+                source: dest_p.clone(),
+                name_enc: crypto::encrypt_text(&mdk, &name, &aad(&id, "name")),
+                path_enc: crypto::encrypt_text(&mdk, &p.dest, &aad(&id, "path")),
+                name,
             }
-            false => None,
-        };
+        });
         close_browsers_for(st, &id);
         spawn_decrypt(app, st, op_id.clone(), id, PathBuf::from(&r.vault_path), vk, p, Some(enc), work, tf as u64, tb as u64)?;
         emit_vaults_changed(app);
@@ -564,6 +628,7 @@ pub async fn relock_vault(app: AppHandle, id: String, credential: Credential, so
         )?;
         let (tf, tb): (i64, i64) = st.db.lock().query_row("SELECT total_files, total_bytes FROM operations WHERE id=?1", [&op_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         st.work.lock().remove(&id);
+        let _ = st.db.delete_setting(&work_pending_key(&id));
         spawn_relock(app, st, op_id.clone(), id, PathBuf::from(&r.vault_path), src, name, vk, tf as u64, tb as u64, false)?;
         emit_vaults_changed(app);
         Ok(op_id)

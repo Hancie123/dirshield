@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type ItemError, type OperationInfo } from "@/api";
 import { useStore } from "@/app/store";
-import { FluentButton, FluentDialog, FluentSpinner, InfoBar } from "@/components/fluent";
+import { FluentButton, FluentDialog, InfoBar, SkeletonRows } from "@/components/fluent";
 
 export function ErrorsDialog({ op }: { op: OperationInfo }) {
   const { closeDialog } = useStore();
@@ -17,7 +17,9 @@ export function ErrorsDialog({ op }: { op: OperationInfo }) {
         </div>
       )}
       {items == null ? (
-        <FluentSpinner />
+        <div className="rounded-[4px] border border-[var(--stroke-card)]">
+          <SkeletonRows rows={4} rowHeight={44} />
+        </div>
       ) : items.length === 0 ? (
         <p className="text-[var(--text-2)]">No individual file errors were recorded.</p>
       ) : (

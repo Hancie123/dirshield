@@ -78,6 +78,10 @@ pub struct AppState {
     pub work: Mutex<HashMap<String, WorkSession>>,
     /// A new recovery key shown to the user but not yet put into use.
     pub pending_recovery: Mutex<Option<Zeroizing<[u8; 32]>>>,
+    /// Held while a Quick Lock's access restriction is changed on purpose
+    /// (unlock) and while the background task checks that locks are intact,
+    /// so the check never puts back a lock that is being removed.
+    pub quick_guard: Mutex<()>,
 }
 
 pub struct WorkSession {
@@ -134,6 +138,7 @@ impl AppState {
             browse: Mutex::new(HashMap::new()),
             work: Mutex::new(HashMap::new()),
             pending_recovery: Mutex::new(None),
+            quick_guard: Mutex::new(()),
         };
         if let Some(m) = st.db.get_setting("autoLockMinutes")?.and_then(|v| v.parse::<u64>().ok()) {
             st.session.set_timeout(std::time::Duration::from_secs(m * 60));
